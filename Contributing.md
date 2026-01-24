@@ -35,7 +35,7 @@ All team members are expected to follow these guidelines to keep the repository 
 
 ---
 
-## Git Commands (Copy & Paste Friendly)
+## Git Commands 
 
 ~~~bash
 # 1) Check what branch you are on

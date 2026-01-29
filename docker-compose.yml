@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16
+    container_name: abjw_postgres
+    environment:
+      POSTGRES_USER: abjw
+      POSTGRES_PASSWORD: abjwpass
+      POSTGRES_DB: abjwdb
+    ports:
+      - "5433:5432"
+    volumes:
+      - abjw_pgdata:/var/lib/postgresql/data
+
+volumes:
+  abjw_pgdata:

@@ -35,6 +35,7 @@ All team members are expected to follow these guidelines to keep the repository 
 
 ---
 
+## Git Commands 
 ## Git Commands
 
 ~~~bash

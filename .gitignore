@@ -15,22 +15,9 @@ __pycache__/
 # =====================
 # Database exports
 # =====================
-data/
 *.csv
 *.parquet
 *.db
-
-# =====================
-# Model artifacts
-# =====================
-models/saved_models/
-*.pkl
-*.joblib
-
-# =====================
-# Jupyter
-# =====================
-.ipynb_checkpoints/
 
 # =====================
 # OS files

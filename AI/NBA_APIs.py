@@ -50,14 +50,24 @@ def parse_scoreboard_games(scoreboard_data):
 
             "start_time_et": game.get("gameEt"),
 
+            # old generic fields if you still want them
             "opening_spread": None,
             "current_spread": None,
+
+            # explicit team spreads
+            "home_opening_spread": None,
+            "away_opening_spread": None,
+            "home_current_spread": None,
+            "away_current_spread": None,
+
             "opening_total": None,
             "current_total": None,
+
             "opening_moneyline_home": None,
             "opening_moneyline_away": None,
             "current_moneyline_home": None,
             "current_moneyline_away": None,
+
             "odds_provider": None
         })
 
@@ -68,7 +78,6 @@ def pick_preferred_book(books):
     """
     Prefer BetMGM US first.
     If not available, fall back to FanDuel US.
-    Then any US book.
     Then first available.
     """
     if not books:
@@ -80,10 +89,6 @@ def pick_preferred_book(books):
 
     for book in books:
         if book.get("name") == "FanDuel" and book.get("countryCode") == "US":
-            return book
-
-    for book in books:
-        if book.get("countryCode") == "US":
             return book
 
     return books[0]
@@ -115,6 +120,12 @@ def parse_odds_games(odds_data):
         parsed = {
             "opening_spread": None,
             "current_spread": None,
+
+            "home_opening_spread": None,
+            "away_opening_spread": None,
+            "home_current_spread": None,
+            "away_current_spread": None,
+
             "opening_total": None,
             "current_total": None,
             "opening_moneyline_home": None,
@@ -152,12 +163,52 @@ def parse_odds_games(odds_data):
                         parsed["opening_moneyline_away"] = to_float(outcome.get("opening_odds"))
 
             elif market_name == "spread":
+                home_spread_found = None
+                home_opening_spread_found = None
+                away_spread_found = None
+                away_opening_spread_found = None
+
                 for outcome in outcomes:
                     outcome_type = (outcome.get("type") or "").lower()
+                    current_spread = to_float(outcome.get("spread"))
+                    opening_spread = to_float(outcome.get("opening_spread"))
 
                     if outcome_type == "home":
-                        parsed["current_spread"] = to_float(outcome.get("spread"))
-                        parsed["opening_spread"] = to_float(outcome.get("opening_spread"))
+                        home_spread_found = current_spread
+                        home_opening_spread_found = opening_spread
+
+                    elif outcome_type == "away":
+                        away_spread_found = current_spread
+                        away_opening_spread_found = opening_spread
+
+                # If both sides exist in the feed, use them directly
+                if home_spread_found is not None:
+                    parsed["home_current_spread"] = home_spread_found
+                if away_spread_found is not None:
+                    parsed["away_current_spread"] = away_spread_found
+
+                if home_opening_spread_found is not None:
+                    parsed["home_opening_spread"] = home_opening_spread_found
+                if away_opening_spread_found is not None:
+                    parsed["away_opening_spread"] = away_opening_spread_found
+
+                # If only home side exists, derive away side
+                if parsed["home_current_spread"] is not None and parsed["away_current_spread"] is None:
+                    parsed["away_current_spread"] = -parsed["home_current_spread"]
+
+                if parsed["home_opening_spread"] is not None and parsed["away_opening_spread"] is None:
+                    parsed["away_opening_spread"] = -parsed["home_opening_spread"]
+
+                # If only away side exists, derive home side
+                if parsed["away_current_spread"] is not None and parsed["home_current_spread"] is None:
+                    parsed["home_current_spread"] = -parsed["away_current_spread"]
+
+                if parsed["away_opening_spread"] is not None and parsed["home_opening_spread"] is None:
+                    parsed["home_opening_spread"] = -parsed["away_opening_spread"]
+
+                # Keep these as home-perspective generic values if you still want them
+                parsed["current_spread"] = parsed["home_current_spread"]
+                parsed["opening_spread"] = parsed["home_opening_spread"]
 
             elif market_name in ("total", "totals", "overunder", "over_under"):
                 for outcome in outcomes:
@@ -207,8 +258,8 @@ def print_condensed_odds_data(odds_data):
 
         condensed_games.append(condensed_game)
 
-    print("=== CONDENSED ODDS DATA ===")
-    print(json.dumps({"games": condensed_games}, indent=2)[:12000])
+    # print("=== CONDENSED ODDS DATA ===")
+    # print(json.dumps({"games": condensed_games}, indent=2)[:12000])
 
 
 def get_today_nba_games():
@@ -225,12 +276,20 @@ def get_today_nba_games():
         if odds:
             game["opening_spread"] = odds.get("opening_spread")
             game["current_spread"] = odds.get("current_spread")
+
+            game["home_opening_spread"] = odds.get("home_opening_spread")
+            game["away_opening_spread"] = odds.get("away_opening_spread")
+            game["home_current_spread"] = odds.get("home_current_spread")
+            game["away_current_spread"] = odds.get("away_current_spread")
+
             game["opening_total"] = odds.get("opening_total")
             game["current_total"] = odds.get("current_total")
+
             game["opening_moneyline_home"] = odds.get("opening_moneyline_home")
             game["opening_moneyline_away"] = odds.get("opening_moneyline_away")
             game["current_moneyline_home"] = odds.get("current_moneyline_home")
             game["current_moneyline_away"] = odds.get("current_moneyline_away")
+
             game["odds_provider"] = odds.get("odds_provider")
 
     return games
@@ -250,13 +309,9 @@ if __name__ == "__main__":
             print(f"Score: {game['away_score']} - {game['home_score']}")
             print(f"Status: {game['game_status']}")
             print(f"Tipoff (ET): {game['start_time_et']}")
-            print(f"Current Spread: {game['current_spread']}")
-            print(f"Opening Spread: {game['opening_spread']}")
-            print(f"Current Total: {game['current_total']}")
-            print(f"Opening Total: {game['opening_total']}")
-            print(f"Current Home ML: {game['current_moneyline_home']}")
-            print(f"Current Away ML: {game['current_moneyline_away']}")
-            print(f"Opening Home ML: {game['opening_moneyline_home']}")
-            print(f"Opening Away ML: {game['opening_moneyline_away']}")
+            print(f"{game['home_team_name']} Current Spread: {game['home_current_spread']}")
+            print(f"{game['away_team_name']} Current Spread: {game['away_current_spread']}")
+            print(f"{game['home_team_name']} Opening Spread: {game['home_opening_spread']}")
+            print(f"{game['away_team_name']} Opening Spread: {game['away_opening_spread']}")
             print(f"Book: {game['odds_provider']}")
             print("-" * 40 + "\n")

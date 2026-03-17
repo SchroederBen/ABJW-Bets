@@ -50,6 +50,80 @@ def avg(nums):
 def pct(num, den):
     return round(num / den, 3) if den else None
 
+def nz(value, default=0.0):
+    return default if value is None else value
+
+
+def calc_site_point_diff(team_summary, is_home):
+    if is_home:
+        pf = nz(team_summary.get("home_avg_pts_for"))
+        pa = nz(team_summary.get("home_avg_pts_against"))
+    else:
+        pf = nz(team_summary.get("away_avg_pts_for"))
+        pa = nz(team_summary.get("away_avg_pts_against"))
+
+    return pf - pa
+
+
+def calculate_estimated_edge(home_summary, away_summary, market_home_spread):
+    if market_home_spread is None:
+        return {
+            "projected_home_margin": None,
+            "fair_home_spread": None,
+            "estimated_edge_points": None,
+            "edge_side": "PASS"
+        }
+
+    home_season_pd = nz(home_summary.get("avg_point_diff"))
+    away_season_pd = nz(away_summary.get("avg_point_diff"))
+
+    home_site_pd = calc_site_point_diff(home_summary, is_home=True)
+    away_site_pd = calc_site_point_diff(away_summary, is_home=False)
+
+    home_recent_pd = nz(home_summary.get("last_5_avg_point_diff"))
+    away_recent_pd = nz(away_summary.get("last_5_avg_point_diff"))
+
+    # weighted strengths
+    home_strength = (
+        0.50 * home_season_pd +
+        0.30 * home_site_pd +
+        0.20 * home_recent_pd
+    )
+
+    away_strength = (
+        0.50 * away_season_pd +
+        0.30 * away_site_pd +
+        0.20 * away_recent_pd
+    )
+
+    # small generic home-court bump
+    home_court_advantage = 1.5
+
+    projected_home_margin = round((home_strength - away_strength) + home_court_advantage, 3)
+
+    # if home projected to win by X, fair home spread is -X
+    fair_home_spread = round(-projected_home_margin, 3)
+
+    # difference between your fair line and market line
+    spread_diff = round(fair_home_spread - market_home_spread, 3)
+    estimated_edge_points = round(abs(spread_diff), 3)
+
+    if -1.5 <= spread_diff <= 1.5:
+        edge_side = "PASS"
+    elif spread_diff < -1.5:
+        edge_side = "HOME_SPREAD"
+    elif spread_diff > 1.5:
+        edge_side = "AWAY_SPREAD"
+    else:
+        edge_side = "PASS"
+
+    return {
+        "projected_home_margin": projected_home_margin,
+        "fair_home_spread": fair_home_spread,
+        "estimated_edge_points": estimated_edge_points,
+        "edge_side": edge_side
+    }
+
 
 def summarize_team(team_id, stats):
     recent_n = 5
@@ -165,12 +239,44 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map)
             print(f"Skipping game because team mapping was not found: {g['away_team_name']} at {g['home_team_name']}")
             continue
 
+        home_team_id = home_team["team_id"]
+        away_team_id = away_team["team_id"]
+
+        home_summary = summarize_team(home_team_id, team_stats[home_team_id])
+        away_summary = summarize_team(away_team_id, team_stats[away_team_id])
+
+        edge_info = calculate_estimated_edge(
+            home_summary,
+            away_summary,
+            g.get("home_current_spread")
+        )
+
         payload.append({
             "game_id": int(g["nba_game_id"]) if g["nba_game_id"] else None,
-            "matchup": f"{away_team['team_name']} vs {home_team['team_name']}",
+            "matchup": f"{away_team['team_name']} @ {home_team['team_name']}",
+            "game_status": g["game_status"],
+
+            "home_team_name": home_team["team_name"],
+            "away_team_name": away_team["team_name"],
+
+            "home_opening_spread": g.get("home_opening_spread"),
+            "away_opening_spread": g.get("away_opening_spread"),
+            "home_current_spread": g.get("home_current_spread"),
+            "away_current_spread": g.get("away_current_spread"),
+
             "opening_spread": g.get("opening_spread"),
             "current_spread": g.get("current_spread"),
-            "game_status": g["game_status"]
+
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+
+            "home_stats": home_summary,
+            "away_stats": away_summary,
+
+            "projected_home_margin": edge_info["projected_home_margin"],
+            "fair_home_spread": edge_info["fair_home_spread"],
+            "estimated_edge_points": edge_info["estimated_edge_points"],
+            "edge_side": edge_info["edge_side"]
         })
 
     return payload

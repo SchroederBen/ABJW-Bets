@@ -18,24 +18,37 @@ Analyze today's NBA matchups using only the structured data provided.
 Recommend which side of the spread should be taken.
 Be conservative and do not force a pick if the edge is weak.
 
-Spread conventions:
-- opening_spread is the opening spread from the home team's perspective.
-- current_spread is the current spread from the home team's perspective.
-- Example: -4.5 means the home team is favored by 4.5.
-- Example: +4.5 means the home team is getting 4.5.
+Matchup conventions:
+- matchup is formatted as "AwayTeam @ HomeTeam"
+- HOME_SPREAD means betting the home team to cover
+- AWAY_SPREAD means betting the away team to cover
 
-Use both the opening and current spread when relevant, especially to notice line movement.
+Important:
+- Use the provided spread fields and precomputed edge fields only as context.
+- estimated_edge_points is precomputed and should be trusted.
+- edge_side is the direction suggested by the precomputed fair-line model.
+- Do not restate or recalculate spread fields.
+- Do not recalculate estimated_edge_points.
+
+PASS rules:
+- If the provided estimated_edge_points is 1.5 or less, return PASS.
+- If confidence would be below 60, return PASS.
+- If the matchup signals are mixed or contradictory, return PASS.
+- If the spread is very large (absolute value 12 or more), only make a pick if the edge is clearly strong.
+- When in doubt, choose PASS instead of forcing a side.
+- Better to PASS than to be make a bad bet.
+
+Recommendation rules:
+- Use edge_side as a strong signal, but not an automatic pick.
+- Only recommend HOME_SPREAD or AWAY_SPREAD when the full context supports it.
+- Otherwise return PASS.
 
 Return valid JSON only.
 
 For each game return:
 - game_id
-- matchup
-- opening_spread
-- current_spread
 - recommended_bet: one of ["HOME_SPREAD", "AWAY_SPREAD", "PASS"]
 - confidence: integer 1-100
-- estimated_edge_points: number
 - short_reason: string
 - risk_flags: array of strings
 """
@@ -68,25 +81,11 @@ Matchups:
                                 "additionalProperties": False,
                                 "properties": {
                                     "game_id": {"type": "integer"},
-                                    "matchup": {"type": "string"},
-                                    "opening_spread": {
-                                        "anyOf": [
-                                            {"type": "number"},
-                                            {"type": "null"}
-                                        ]
-                                    },
-                                    "current_spread": {
-                                        "anyOf": [
-                                            {"type": "number"},
-                                            {"type": "null"}
-                                        ]
-                                    },
                                     "recommended_bet": {
                                         "type": "string",
                                         "enum": ["HOME_SPREAD", "AWAY_SPREAD", "PASS"]
                                     },
                                     "confidence": {"type": "integer"},
-                                    "estimated_edge_points": {"type": "number"},
                                     "short_reason": {"type": "string"},
                                     "risk_flags": {
                                         "type": "array",
@@ -95,12 +94,8 @@ Matchups:
                                 },
                                 "required": [
                                     "game_id",
-                                    "matchup",
-                                    "opening_spread",
-                                    "current_spread",
                                     "recommended_bet",
                                     "confidence",
-                                    "estimated_edge_points",
                                     "short_reason",
                                     "risk_flags"
                                 ]
@@ -113,4 +108,46 @@ Matchups:
         }
     )
 
-    return json.loads(response.output_text)
+    ai_result = json.loads(response.output_text)
+    return merge_ai_predictions(matchups, ai_result)
+
+
+def merge_ai_predictions(matchups, ai_result):
+    ai_map = {int(p["game_id"]): p for p in ai_result["predictions"]}
+    merged = {"predictions": []}
+
+    for game in matchups:
+        game_id = int(game["game_id"])
+        ai_pick = ai_map.get(game_id)
+        if not ai_pick:
+            continue
+
+        merged_pick = {
+            "game_id": game_id,
+            "matchup": game["matchup"],
+            "home_team_name": game["home_team_name"],
+            "away_team_name": game["away_team_name"],
+            f'{game["home_team_name"]}_current_spread': game["home_current_spread"],
+            f'{game["away_team_name"]}_current_spread': game["away_current_spread"],
+            f'{game["home_team_name"]}_opening_spread': game["home_opening_spread"],
+            f'{game["away_team_name"]}_opening_spread': game["away_opening_spread"],
+            "projected_home_margin": game.get("projected_home_margin"),
+            "fair_home_spread": game.get("fair_home_spread"),
+            "estimated_edge_points": game.get("estimated_edge_points"),
+            "edge_side": game.get("edge_side"),
+            "recommended_bet": ai_pick["recommended_bet"],
+            "confidence": ai_pick["confidence"],
+            "short_reason": ai_pick["short_reason"],
+            "risk_flags": ai_pick["risk_flags"]
+        }
+
+        if ai_pick["recommended_bet"] == "HOME_SPREAD":
+            merged_pick["recommended_bet"] = f'{game["home_team_name"]} {game["home_current_spread"]:+.1f}'
+        elif ai_pick["recommended_bet"] == "AWAY_SPREAD":
+            merged_pick["recommended_bet"] = f'{game["away_team_name"]} {game["away_current_spread"]:+.1f}'
+        else:
+            merged_pick["recommended_bet"] = "PASS"
+
+        merged["predictions"].append(merged_pick)
+
+    return merged

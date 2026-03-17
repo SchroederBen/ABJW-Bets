@@ -16,10 +16,16 @@ DATABASE_URL = (
 
 engine = create_engine(DATABASE_URL)
 
-with engine.connect() as conn:
-    result = conn.execute(text("SELECT current_database(), current_user"))
-    row = result.fetchone()
 
-    print("Connected successfully")
-    print("Database:", row[0])
-    print("User:", row[1])
+def test_connection():
+    with engine.connect() as conn:
+        result = conn.execute(text("SELECT current_database(), current_user"))
+        row = result.fetchone()
+
+        print("Connected successfully")
+        print("Database:", row[0])
+        print("User:", row[1])
+
+
+if __name__ == "__main__":
+    test_connection()

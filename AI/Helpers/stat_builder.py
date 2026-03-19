@@ -1,15 +1,11 @@
 from collections import defaultdict
 
 
-def calc_home_cover(opening_spread, home_score, away_score, home_spread_is_positive_favorite=True):
+def calc_home_cover(opening_spread, home_score, away_score):
     if opening_spread is None:
         return None
 
     mov = home_score - away_score
-
-    if home_spread_is_positive_favorite:
-        return mov > opening_spread
-
     return (mov + opening_spread) > 0
 
 
@@ -50,6 +46,7 @@ def avg(nums):
 def pct(num, den):
     return round(num / den, 3) if den else None
 
+
 def nz(value, default=0.0):
     return default if value is None else value
 
@@ -83,7 +80,6 @@ def calculate_estimated_edge(home_summary, away_summary, market_home_spread):
     home_recent_pd = nz(home_summary.get("last_5_avg_point_diff"))
     away_recent_pd = nz(away_summary.get("last_5_avg_point_diff"))
 
-    # weighted strengths
     home_strength = (
         0.50 * home_season_pd +
         0.30 * home_site_pd +
@@ -96,15 +92,11 @@ def calculate_estimated_edge(home_summary, away_summary, market_home_spread):
         0.20 * away_recent_pd
     )
 
-    # small generic home-court bump
     home_court_advantage = 1.5
 
     projected_home_margin = round((home_strength - away_strength) + home_court_advantage, 3)
-
-    # if home projected to win by X, fair home spread is -X
     fair_home_spread = round(-projected_home_margin, 3)
 
-    # difference between your fair line and market line
     spread_diff = round(fair_home_spread - market_home_spread, 3)
     estimated_edge_points = round(abs(spread_diff), 3)
 
@@ -159,7 +151,7 @@ def summarize_team(team_id, stats):
     }
 
 
-def build_team_stats(historical_games, home_spread_is_positive_favorite=True):
+def build_team_stats(historical_games):
     team_stats = defaultdict(init_team_stats)
 
     for g in historical_games:
@@ -172,12 +164,7 @@ def build_team_stats(historical_games, home_spread_is_positive_favorite=True):
         home_win = hs > aws
         away_win = aws > hs
 
-        home_cover = calc_home_cover(
-            spread,
-            hs,
-            aws,
-            home_spread_is_positive_favorite=home_spread_is_positive_favorite
-        )
+        home_cover = calc_home_cover(spread, hs, aws)
         away_cover = None if home_cover is None else (not home_cover)
 
         home_stats = team_stats[home]
@@ -225,7 +212,111 @@ def build_team_stats(historical_games, home_spread_is_positive_favorite=True):
     return team_stats
 
 
-def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map):
+def build_head_to_head_stats(home_team_id, away_team_id, historical_games):
+    h2h_games = []
+
+    for g in historical_games:
+        g_home = g["home_team_id"]
+        g_away = g["away_team_id"]
+
+        teams_match = (
+            (g_home == home_team_id and g_away == away_team_id) or
+            (g_home == away_team_id and g_away == home_team_id)
+        )
+
+        if teams_match:
+            h2h_games.append(g)
+
+    if not h2h_games:
+        return {
+            "games": 0,
+            "home_team_wins": 0,
+            "away_team_wins": 0,
+            "home_team_win_pct": None,
+            "away_team_win_pct": None,
+            "home_team_avg_margin": None,
+            "away_team_avg_margin": None,
+            "home_team_ats_wins": 0,
+            "away_team_ats_wins": 0,
+            "home_team_ats_win_pct": None,
+            "away_team_ats_win_pct": None,
+            "last_5_matchups": []
+        }
+
+    home_team_wins = 0
+    away_team_wins = 0
+    home_team_ats_wins = 0
+    away_team_ats_wins = 0
+    margins_for_home_team = []
+    last_5_matchups = []
+
+    for g in h2h_games:
+        g_home = g["home_team_id"]
+        g_away = g["away_team_id"]
+        hs = g["home_score"]
+        aws = g["away_score"]
+        spread = g["opening_spread"]
+
+        if g_home == home_team_id and g_away == away_team_id:
+            margin_for_home_team = hs - aws
+            home_team_won = hs > aws
+
+            home_cover = calc_home_cover(spread, hs, aws)  
+            away_cover = None if home_cover is None else (not home_cover)
+
+            h2h_home_cover = home_cover
+            h2h_away_cover = away_cover
+
+        else:
+            margin_for_home_team = aws - hs
+            home_team_won = aws > hs
+
+            actual_home_cover = calc_home_cover(spread, hs, aws)
+            actual_away_cover = None if actual_home_cover is None else (not actual_home_cover)
+
+            h2h_home_cover = actual_away_cover
+            h2h_away_cover = actual_home_cover
+
+        margins_for_home_team.append(margin_for_home_team)
+
+        if home_team_won:
+            home_team_wins += 1
+        else:
+            away_team_wins += 1
+
+        if h2h_home_cover is True:
+            home_team_ats_wins += 1
+        if h2h_away_cover is True:
+            away_team_ats_wins += 1
+
+        last_5_matchups.append({
+            "margin_for_home_team": margin_for_home_team,
+            "home_team_won": home_team_won,
+            "home_team_covered": h2h_home_cover,
+            "away_team_covered": h2h_away_cover
+        })
+
+    last_5_matchups = last_5_matchups[-5:]
+
+    games = len(h2h_games)
+
+    return {
+        "games": games,
+        "home_team_wins": home_team_wins,
+        "away_team_wins": away_team_wins,
+        "home_team_win_pct": pct(home_team_wins, games),
+        "away_team_win_pct": pct(away_team_wins, games),
+        "home_team_avg_margin": avg(margins_for_home_team),
+        "away_team_avg_margin": round(-avg(margins_for_home_team), 3) if margins_for_home_team else None,
+        "home_team_ats_wins": home_team_ats_wins,
+        "away_team_ats_wins": away_team_ats_wins,
+        "home_team_ats_win_pct": pct(home_team_ats_wins, games),
+        "away_team_ats_win_pct": pct(away_team_ats_wins, games),
+        "last_5_matchups": last_5_matchups
+    }
+
+
+def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map, historical_games):
     payload = []
 
     for g in api_games:
@@ -251,6 +342,12 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map)
             g.get("home_current_spread")
         )
 
+        h2h_stats = build_head_to_head_stats(
+            home_team_id,
+            away_team_id,
+            historical_games
+        )
+
         payload.append({
             "game_id": int(g["nba_game_id"]) if g["nba_game_id"] else None,
             "matchup": f"{away_team['team_name']} @ {home_team['team_name']}",
@@ -272,6 +369,7 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map)
 
             "home_stats": home_summary,
             "away_stats": away_summary,
+            "head_to_head_stats": h2h_stats,
 
             "projected_home_margin": edge_info["projected_home_margin"],
             "fair_home_spread": edge_info["fair_home_spread"],

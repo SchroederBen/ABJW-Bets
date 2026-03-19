@@ -34,6 +34,11 @@ PASS rules:
 - If the provided estimated_edge_points is 1.5 or less, return PASS.
 - If confidence would be below 60, return PASS.
 - If the matchup signals are mixed or contradictory, return PASS.
+    Do not use vague phrases like "mixed signals" or "conflicting indicators" by themselves.
+    Always name the specific conflict, such as:
+    - fair-line edge favors away team but recent form favors home team
+    - estimated edge is strong but confidence is lowered by large spread
+    - model edge and head-to-head trend disagree
 - If the spread is very large (absolute value 12 or more), only make a pick if the edge is clearly strong.
 - When in doubt, choose PASS instead of forcing a side.
 - Better to PASS than to be make a bad bet.
@@ -114,7 +119,10 @@ Matchups:
 
 def merge_ai_predictions(matchups, ai_result):
     ai_map = {int(p["game_id"]): p for p in ai_result["predictions"]}
-    merged = {"predictions": []}
+    merged = {
+        "predictions": [],
+        "human_readable": []
+    }
 
     for game in matchups:
         game_id = int(game["game_id"])
@@ -142,12 +150,30 @@ def merge_ai_predictions(matchups, ai_result):
         }
 
         if ai_pick["recommended_bet"] == "HOME_SPREAD":
-            merged_pick["recommended_bet"] = f'{game["home_team_name"]} {game["home_current_spread"]:+.1f}'
+            final_bet = f'{game["home_team_name"]} {game["home_current_spread"]:+.1f}'
         elif ai_pick["recommended_bet"] == "AWAY_SPREAD":
-            merged_pick["recommended_bet"] = f'{game["away_team_name"]} {game["away_current_spread"]:+.1f}'
+            final_bet = f'{game["away_team_name"]} {game["away_current_spread"]:+.1f}'
         else:
-            merged_pick["recommended_bet"] = "PASS"
+            final_bet = "PASS"
 
+        merged_pick["recommended_bet"] = final_bet
         merged["predictions"].append(merged_pick)
+
+        risk_text = ", ".join(ai_pick["risk_flags"]) if ai_pick["risk_flags"] else "None"
+        edge_text = (
+            f'{game["estimated_edge_points"]:.2f}'
+            if game.get("estimated_edge_points") is not None
+            else "N/A"
+        )
+
+        readable_summary = (
+            f'{game["matchup"]} | Bet: {final_bet} | '
+            f'Confidence: {ai_pick["confidence"]} | '
+            f'Estimated Edge: {edge_text} | '
+            f'Reason: {ai_pick["short_reason"]} | '
+            f'Risk Flags: {risk_text}'
+        )
+
+        merged["human_readable"].append(readable_summary)
 
     return merged

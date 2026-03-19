@@ -9,10 +9,8 @@ from NBA_APIs import get_today_nba_games
 
 load_dotenv()
 
-START_DATE = os.getenv("START_DATE", "2024-01-01")
-HOME_SPREAD_IS_POSITIVE_FAVORITE = (
-    os.getenv("HOME_SPREAD_IS_POSITIVE_FAVORITE", "true").lower() == "true"
-)
+#year-month-day
+START_DATE = os.getenv("START_DATE", "2023-10-01")
 
 
 def main():
@@ -34,27 +32,37 @@ def main():
             return
 
         team_stats = build_team_stats(
-            historical_games,
-            home_spread_is_positive_favorite=HOME_SPREAD_IS_POSITIVE_FAVORITE
+            historical_games
         )
 
         matchup_payload = build_matchup_payload_from_api_games(
             todays_api_games,
             team_stats,
-            source_team_map
+            source_team_map,
+            historical_games
         )
 
         if not matchup_payload:
             print("No matchups could be built from API games and DB team mappings.")
             return
 
-        print("=== Matchup payload sent to AI ===")
-        print(json.dumps(matchup_payload, indent=2, default=str))
+        #print("=== Matchup payload sent to AI ===")
+        #print(json.dumps(matchup_payload, indent=2, default=str))
+
+        print("\n=== Head-to-Head Stats ===")
+        for game in matchup_payload:
+            print(f'{game["matchup"]}')
+            print(json.dumps(game.get("head_to_head_stats", {}), indent=2))
+            print()
 
         ai_result = ask_ai_for_spread_picks(matchup_payload)
 
         print("\n=== AI Predictions ===")
         print(json.dumps(ai_result, indent=2))
+
+        print("\n=== Human Readable Predictions ===")
+        for line in ai_result.get("human_readable", []):
+            print(line+"\n")
 
     except Exception as e:
         print(f"Unexpected error: {e}")

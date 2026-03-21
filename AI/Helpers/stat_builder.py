@@ -62,15 +62,7 @@ def calc_site_point_diff(team_summary, is_home):
     return pf - pa
 
 
-def calculate_estimated_edge(home_summary, away_summary, market_home_spread):
-    if market_home_spread is None:
-        return {
-            "projected_home_margin": None,
-            "fair_home_spread": None,
-            "estimated_edge_points": None,
-            "edge_side": "PASS"
-        }
-
+def _get_strength_inputs(home_summary, away_summary):
     home_season_pd = nz(home_summary.get("avg_point_diff"))
     away_season_pd = nz(away_summary.get("avg_point_diff"))
 
@@ -80,16 +72,37 @@ def calculate_estimated_edge(home_summary, away_summary, market_home_spread):
     home_recent_pd = nz(home_summary.get("last_5_avg_point_diff"))
     away_recent_pd = nz(away_summary.get("last_5_avg_point_diff"))
 
+    return {
+        "home_season_pd": home_season_pd,
+        "away_season_pd": away_season_pd,
+        "home_site_pd": home_site_pd,
+        "away_site_pd": away_site_pd,
+        "home_recent_pd": home_recent_pd,
+        "away_recent_pd": away_recent_pd
+    }
+
+
+def calculate_estimated_edge(home_summary, away_summary, market_home_spread):
+    if market_home_spread is None:
+        return {
+            "projected_home_margin": None,
+            "fair_home_spread": None,
+            "estimated_edge_points": None,
+            "edge_side": "PASS"
+        }
+
+    vals = _get_strength_inputs(home_summary, away_summary)
+
     home_strength = (
-        0.50 * home_season_pd +
-        0.30 * home_site_pd +
-        0.20 * home_recent_pd
+        0.50 * vals["home_season_pd"] +
+        0.30 * vals["home_site_pd"] +
+        0.20 * vals["home_recent_pd"]
     )
 
     away_strength = (
-        0.50 * away_season_pd +
-        0.30 * away_site_pd +
-        0.20 * away_recent_pd
+        0.50 * vals["away_season_pd"] +
+        0.30 * vals["away_site_pd"] +
+        0.20 * vals["away_recent_pd"]
     )
 
     home_court_advantage = 1.5
@@ -112,6 +125,119 @@ def calculate_estimated_edge(home_summary, away_summary, market_home_spread):
     return {
         "projected_home_margin": projected_home_margin,
         "fair_home_spread": fair_home_spread,
+        "estimated_edge_points": estimated_edge_points,
+        "edge_side": edge_side
+    }
+
+
+def calculate_estimated_edge_v2(home_summary, away_summary, market_home_spread):
+    if market_home_spread is None:
+        return {
+            "projected_home_margin": None,
+            "fair_home_spread": None,
+            "spread_diff": None,
+            "adjusted_spread_diff": None,
+            "estimated_edge_points": None,
+            "edge_side": "PASS"
+        }
+
+    vals = _get_strength_inputs(home_summary, away_summary)
+
+    home_strength = (
+        0.60 * vals["home_season_pd"] +
+        0.25 * vals["home_site_pd"] +
+        0.15 * vals["home_recent_pd"]
+    )
+
+    away_strength = (
+        0.60 * vals["away_season_pd"] +
+        0.25 * vals["away_site_pd"] +
+        0.15 * vals["away_recent_pd"]
+    )
+
+    home_court_advantage = 1.5
+
+    raw_projected_home_margin = (home_strength - away_strength) + home_court_advantage
+    projected_home_margin = round(raw_projected_home_margin * 1.10, 3)
+    fair_home_spread = round(-projected_home_margin, 3)
+
+    spread_diff = round(fair_home_spread - market_home_spread, 3)
+
+    adjusted_spread_diff = spread_diff
+    if abs(market_home_spread) >= 10:
+        adjusted_spread_diff *= 0.80
+    elif abs(market_home_spread) >= 7:
+        adjusted_spread_diff *= 0.90
+
+    adjusted_spread_diff = round(adjusted_spread_diff, 3)
+    estimated_edge_points = round(abs(adjusted_spread_diff), 3)
+
+    threshold = 2.5
+    if abs(market_home_spread) >= 10:
+        threshold = 3.5
+
+    if abs(adjusted_spread_diff) <= threshold:
+        edge_side = "PASS"
+    elif adjusted_spread_diff < 0:
+        edge_side = "HOME_SPREAD"
+    else:
+        edge_side = "AWAY_SPREAD"
+
+    return {
+        "projected_home_margin": projected_home_margin,
+        "fair_home_spread": fair_home_spread,
+        "spread_diff": spread_diff,
+        "adjusted_spread_diff": adjusted_spread_diff,
+        "estimated_edge_points": estimated_edge_points,
+        "edge_side": edge_side
+    }
+
+def calculate_estimated_edge_v3(home_summary, away_summary, market_home_spread):
+    if market_home_spread is None:
+        return {
+            "projected_home_margin": None,
+            "fair_home_spread": None,
+            "spread_diff": None,
+            "estimated_edge_points": None,
+            "edge_side": "PASS"
+        }
+
+    vals = _get_strength_inputs(home_summary, away_summary)
+
+    home_strength = (
+        0.60 * vals["home_season_pd"] +
+        0.25 * vals["home_site_pd"] +
+        0.15 * vals["home_recent_pd"]
+    )
+
+    away_strength = (
+        0.60 * vals["away_season_pd"] +
+        0.25 * vals["away_site_pd"] +
+        0.15 * vals["away_recent_pd"]
+    )
+
+    home_court_advantage = 1.5
+
+    raw_projected_home_margin = (home_strength - away_strength) + home_court_advantage
+
+    # calibration placeholder — tune from backtest
+    calibrated_home_margin = round(raw_projected_home_margin * 1.10, 3)
+
+    fair_home_spread = round(-calibrated_home_margin, 3)
+    spread_diff = round(fair_home_spread - market_home_spread, 3)
+    estimated_edge_points = round(abs(spread_diff), 3)
+
+    if abs(spread_diff) <= 2.5:
+        edge_side = "PASS"
+    elif spread_diff < 0:
+        edge_side = "HOME_SPREAD"
+    else:
+        edge_side = "AWAY_SPREAD"
+
+    return {
+        "projected_home_margin": calibrated_home_margin,
+        "fair_home_spread": fair_home_spread,
+        "spread_diff": spread_diff,
         "estimated_edge_points": estimated_edge_points,
         "edge_side": edge_side
     }
@@ -336,11 +462,26 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
         home_summary = summarize_team(home_team_id, team_stats[home_team_id])
         away_summary = summarize_team(away_team_id, team_stats[away_team_id])
 
-        edge_info = calculate_estimated_edge(
+        edge_info_v1 = calculate_estimated_edge(
             home_summary,
             away_summary,
             g.get("home_current_spread")
         )
+
+        edge_info_v2 = calculate_estimated_edge_v2(
+            home_summary,
+            away_summary,
+            g.get("home_current_spread")
+        )
+
+        edge_info_v3 = calculate_estimated_edge_v3(
+            home_summary,
+            away_summary,
+            g.get("home_current_spread")
+        )
+
+        #which one to use as primary edge info sent to AI
+        active_edge_info = edge_info_v2
 
         h2h_stats = build_head_to_head_stats(
             home_team_id,
@@ -371,10 +512,16 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
             "away_stats": away_summary,
             "head_to_head_stats": h2h_stats,
 
-            "projected_home_margin": edge_info["projected_home_margin"],
-            "fair_home_spread": edge_info["fair_home_spread"],
-            "estimated_edge_points": edge_info["estimated_edge_points"],
-            "edge_side": edge_info["edge_side"]
+            # fields AI currently expects
+            "projected_home_margin": active_edge_info["projected_home_margin"],
+            "fair_home_spread": active_edge_info["fair_home_spread"],
+            "estimated_edge_points": active_edge_info["estimated_edge_points"],
+            "edge_side": active_edge_info["edge_side"],
+
+            # keep both for testing
+            "edge_model_v1": edge_info_v1,
+            "edge_model_v2": edge_info_v2,
+            "edge_model_v3": edge_info_v3
         })
 
     return payload

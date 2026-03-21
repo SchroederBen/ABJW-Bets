@@ -25,8 +25,9 @@ Matchup conventions:
 
 Important:
 - Use the provided spread fields and precomputed edge fields only as context.
-- estimated_edge_points is precomputed and should be trusted.
-- edge_side is the direction suggested by the precomputed fair-line model.
+- Treat estimated_edge_points and edge_side as the primary decision inputs.
+- Do not infer a stronger edge than the provided estimated_edge_points.
+- If estimated_edge_points is null, return PASS.
 - Do not restate or recalculate spread fields.
 - Do not recalculate estimated_edge_points.
 

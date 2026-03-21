@@ -60,6 +60,16 @@ def main():
         print("\n=== AI Predictions ===")
         print(json.dumps(ai_result, indent=2))
 
+        print("\n=== Edge Debug ===")
+        for game in matchup_payload:
+            print(game["matchup"])
+            print("top-level estimated_edge_points:", game.get("estimated_edge_points"))
+            print("top-level edge_side:", game.get("edge_side"))
+            print("v1:", game.get("edge_model_v1"))
+            print("v2:", game.get("edge_model_v2"))
+            print("v3:", game.get("edge_model_v3"))
+            print()
+
         print("\n=== Human Readable Predictions ===")
         for line in ai_result.get("human_readable", []):
             print(line+"\n")

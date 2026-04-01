@@ -49,6 +49,8 @@ Recommendation rules:
 - Only recommend HOME_SPREAD or AWAY_SPREAD when the full context supports it.
 - Otherwise return PASS.
 
+Always ensure each game has a decision, do not omit or skip any games.
+
 Return valid JSON only.
 
 For each game return:

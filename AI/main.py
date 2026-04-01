@@ -1,5 +1,8 @@
 import os
 import json
+import csv
+from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
 from Helpers.game_queries import fetch_historical_games, fetch_team_id_map_by_source_id
@@ -11,6 +14,56 @@ load_dotenv()
 
 #year-month-day
 START_DATE = os.getenv("START_DATE", "2023-10-01")
+RUN_LOG_CSV = Path(__file__).resolve().parent / "run_results_log.csv"
+
+
+def append_run_results_to_csv(ai_result):
+    run_timestamp = datetime.now().isoformat(timespec="seconds")
+    csv_headers = [
+        "run_timestamp",
+        "game_id",
+        "matchup",
+        "home_team_name",
+        "away_team_name",
+        "projected_home_margin",
+        "fair_home_spread",
+        "estimated_edge_points",
+        "edge_side",
+        "recommended_bet",
+        "confidence",
+        "short_reason",
+        "risk_flags"
+    ]
+
+    rows = []
+    for prediction in ai_result.get("predictions", []):
+        rows.append(
+            {
+                "run_timestamp": run_timestamp,
+                "game_id": prediction.get("game_id"),
+                "matchup": prediction.get("matchup"),
+                "home_team_name": prediction.get("home_team_name"),
+                "away_team_name": prediction.get("away_team_name"),
+                "projected_home_margin": prediction.get("projected_home_margin"),
+                "fair_home_spread": prediction.get("fair_home_spread"),
+                "estimated_edge_points": prediction.get("estimated_edge_points"),
+                "edge_side": prediction.get("edge_side"),
+                "recommended_bet": prediction.get("recommended_bet"),
+                "confidence": prediction.get("confidence"),
+                "short_reason": prediction.get("short_reason"),
+                "risk_flags": " | ".join(prediction.get("risk_flags", []))
+            }
+        )
+
+    if not rows:
+        return
+
+    file_exists = RUN_LOG_CSV.exists()
+    with RUN_LOG_CSV.open("a", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=csv_headers)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(rows)
 
 
 def main():
@@ -59,16 +112,17 @@ def main():
 
         print("\n=== AI Predictions ===")
         print(json.dumps(ai_result, indent=2))
+        append_run_results_to_csv(ai_result)
+        print(f"\nSaved run results to CSV: {RUN_LOG_CSV}")
 
-        print("\n=== Edge Debug ===")
+        print("\n=== V1 vs V2 Comparison ===")
         for game in matchup_payload:
-            print(game["matchup"])
-            print("top-level estimated_edge_points:", game.get("estimated_edge_points"))
-            print("top-level edge_side:", game.get("edge_side"))
-            print("v1:", game.get("edge_model_v1"))
-            print("v2:", game.get("edge_model_v2"))
-            print("v3:", game.get("edge_model_v3"))
-            print()
+            print(
+                f"{game['matchup']} | "
+                f"V1: {game['edge_model_v1']['edge_side']} ({game['edge_model_v1']['estimated_edge_points']}) | "
+                f"V2: {game['edge_model_v2']['edge_side']} ({game['edge_model_v2']['estimated_edge_points']}) | "
+                f"ACTIVE: {game['edge_side']}"
+    )
 
         print("\n=== Human Readable Predictions ===")
         for line in ai_result.get("human_readable", []):

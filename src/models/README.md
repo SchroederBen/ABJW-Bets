@@ -6,6 +6,10 @@ This directory contains the end-to-end logistic regression pipeline used to pred
 - **Target**: `team_win` from the home team’s perspective (1 = home win, 0 = loss)
 - **Design goals**: well-calibrated probabilities (log loss / Brier score) and interpretability via model coefficients
 
+**ATS / spread (LLM-aligned)**: see **`train_logistic_cover_model.py`** — same rolling features, but the target is **`home_cover`** vs **`opening_spread`** (pushes dropped). Artifacts use prefixes `l2_cover_*` and `l1_cover_*`. Run: `python -m src.models.train_logistic_cover_model [l2|l1|all] [--recent]`.
+
+**Reusable L1 selection**: **`l1_feature_selection.py`** exposes `run_l1_feature_selection()` and `load_surviving_feature_names()` so any pipeline (cover, win, future LLM builders) can share the same Lasso CV + surviving-feature JSON. The cover trainer uses it with `artifact_prefix="l1_cover_selection"` and `feature_list_prefix="l1_cover"` for filenames.
+
 ### Files
 
 - **`train_logistic_model.py`**

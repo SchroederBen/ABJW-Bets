@@ -12,6 +12,12 @@ Typical artifacts (when ``artifacts_dir`` is set):
     - ``{prefix}_features_all_{ts}.json`` — full column list (training order)
     - ``{prefix}_features_reduced_{ts}.json`` — surviving feature names (for LLM)
     - ``{prefix}_coefficients_{ts}.csv``
+
+Live AI allow-list (single file, overwritten each run):
+    ``AI/config/l1_allowlist/features_reduced.json`` — consumed by
+    ``AI/Helpers/l1_live_features.py`` unless ``AI_L1_FEATURES_JSON`` overrides.
+    Enable via ``run_l1_feature_selection(..., export_live_allowlist=True)`` or
+    ``python -m src.models.train_logistic_model l1|all --export-live``.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import joblib
 import numpy as np
@@ -37,6 +43,33 @@ from sklearn.preprocessing import StandardScaler
 
 
 DEFAULT_ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
+
+# Tighter than sklearn default Cs=int (1e-4..1e4); smaller C → stronger L1 → more zeros.
+DEFAULT_L1_CS_GRID = np.logspace(-3, 1.5, 16)
+
+# Repo root = src/models -> parents[2]; fixed path for AI live inference (no timestamp)
+LIVE_ALLOWLIST_RELATIVE = Path("AI") / "config" / "l1_allowlist" / "features_reduced.json"
+
+
+def default_ai_live_allowlist_path() -> Path:
+    """Path to the single JSON file ``l1_live_features`` loads by default."""
+    return Path(__file__).resolve().parents[2] / LIVE_ALLOWLIST_RELATIVE
+
+
+def write_ai_live_allowlist_json(
+    surviving_features: list[str],
+    *,
+    path: Path | None = None,
+) -> Path:
+    """
+    Write sorted surviving feature names to one JSON file (overwrites previous).
+    Used so the AI pipeline always reads the latest L1 run from a stable path.
+    """
+    out = path if path is not None else default_ai_live_allowlist_path()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(sorted(surviving_features), f, indent=2)
+    return out
 
 
 @dataclass
@@ -79,9 +112,11 @@ def run_l1_feature_selection(
     phase_name: str = "L1_selection",
     baseline_metrics: dict | None = None,
     print_header: str = "Training LogisticRegressionCV (L1 / Lasso)...",
-    cs: int = 10,
+    cs: Sequence[float] | np.ndarray | None = None,
     random_state: int = 42,
     save_artifacts: bool = True,
+    export_live_allowlist: bool = False,
+    live_allowlist_path: Path | None = None,
 ) -> L1FeatureSelectionResult:
     """
     Fit L1 logistic regression, identify surviving vs dropped features, evaluate
@@ -103,13 +138,23 @@ def run_l1_feature_selection(
     feature_list_prefix
         If set, used for ``*_features_all_*``, ``*_features_reduced_*``, and
         ``*_coefficients_*`` filenames; otherwise *artifact_prefix* is used for all.
+    export_live_allowlist
+        If True, write surviving feature names to ``AI/config/l1_allowlist/features_reduced.json``
+        (or *live_allowlist_path*), replacing any previous file.
+    live_allowlist_path
+        Optional override path for the live allow-list JSON.
+    cs
+        Inverse regularization strengths for CV (smaller = stronger L1). Default:
+        ``DEFAULT_L1_CS_GRID`` (~0.001 .. ~31.6).
     """
     tscv = TimeSeriesSplit(n_splits=5)
     print(f"\n{print_header}")
 
+    cs_grid = DEFAULT_L1_CS_GRID if cs is None else np.asarray(cs, dtype=float)
+
     model = LogisticRegressionCV(
         penalty="l1",
-        Cs=cs,
+        Cs=cs_grid,
         cv=tscv,
         solver="liblinear",
         max_iter=1000,
@@ -221,6 +266,12 @@ def run_l1_feature_selection(
             f"\n  LLM / context: use features_reduced file for column allow-list "
             f"({paths['features_reduced'].name})"
         )
+
+    if export_live_allowlist:
+        live_p = write_ai_live_allowlist_json(
+            surviving, path=live_allowlist_path
+        )
+        print(f"\n  Live AI allow-list written (overwrite): {live_p}")
 
     return L1FeatureSelectionResult(
         model=model,

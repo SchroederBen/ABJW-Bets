@@ -1,5 +1,10 @@
 from collections import defaultdict
 
+from Helpers.l1_live_features import (
+    build_l1_model_features_subset,
+    get_l1_allowlist_from_env,
+)
+
 
 def calc_home_cover(opening_spread, home_score, away_score):
     if opening_spread is None:
@@ -489,7 +494,7 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
             historical_games
         )
 
-        payload.append({
+        game_entry = {
             "game_id": int(g["nba_game_id"]) if g["nba_game_id"] else None,
             "matchup": f"{away_team['team_name']} @ {home_team['team_name']}",
             "game_status": g["game_status"],
@@ -521,7 +526,20 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
             # keep both for testing
             "edge_model_v1": edge_info_v1,
             "edge_model_v2": edge_info_v2,
-            "edge_model_v3": edge_info_v3
-        })
+            "edge_model_v3": edge_info_v3,
+        }
+
+        # Optional: JSON allow-list from L1 (env AI_L1_FEATURES_JSON) — same names as training
+        l1_allow = get_l1_allowlist_from_env()
+        if l1_allow:
+            game_entry["l1_model_features"] = build_l1_model_features_subset(
+                l1_allow,
+                home_team_id,
+                away_team_id,
+                historical_games,
+                g,
+            )
+
+        payload.append(game_entry)
 
     return payload

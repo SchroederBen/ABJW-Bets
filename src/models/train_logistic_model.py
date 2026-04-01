@@ -10,6 +10,9 @@ Phase 2 – L1 Feature Selection (Lasso) & Elastic Net: Retrain with L1 penalty
     compare against the L2 baseline. Also trains an Elastic Net blend.
 
 Artifacts saved to src/models/artifacts/.
+
+CLI: ``python -m src.models.train_logistic_model l1|all [--recent] [--export-live]``
+writes ``AI/config/l1_allowlist/features_reduced.json`` (overwrites) for live AI payloads.
 """
 
 import json
@@ -35,9 +38,15 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 
 from src.data.build_pregame_features import build_pregame_features
+from src.models.l1_feature_selection import write_ai_live_allowlist_json
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
 WINDOWS = (3, 5, 10)
+
+# LogisticRegressionCV: Cs=int uses logspace(1e-4, 1e4) and often picks huge C → no L1 zeros.
+# Smaller C = stronger L1 / more sparsity; cap max C so CV explores meaningful shrinkage.
+L1_CS_GRID = np.logspace(-3, 1.5, 16)  # ~0.001 .. ~31.6
+ENET_CS_GRID = np.logspace(-2, 1.5, 12)  # ~0.01 .. ~31.6 (saga ENET phase)
 TEST_FRACTION = 0.20
 RECENT_CUTOFF = "2015-01-01"
 
@@ -331,6 +340,7 @@ def train_l1_selection(
     l2_metrics: dict | None = None,
     *,
     recent_only: bool = False,
+    export_live_allowlist: bool = False,
 ) -> tuple:
     """Train L1 (Lasso) and Elastic Net models, compare against L2 baseline.
 
@@ -340,6 +350,10 @@ def train_l1_selection(
         2. Fit Elastic Net (blend of L1 + L2) across several l1_ratio values.
         3. Print a side-by-side comparison of L2, L1, and Elastic Net.
         4. Persist the L1 model, reduced feature list, and metrics.
+
+    export_live_allowlist
+        If True, also overwrite ``AI/config/l1_allowlist/features_reduced.json`` for
+        ``l1_live_features`` (use ``--export-live`` on the CLI).
     """
 
     if data is None:
@@ -365,7 +379,7 @@ def train_l1_selection(
     print("\nTraining LogisticRegressionCV (L1 / Lasso)...")
     l1_model = LogisticRegressionCV(
         penalty="l1",
-        Cs=10,
+        Cs=L1_CS_GRID,
         cv=tscv,
         solver="liblinear",
         max_iter=1000,
@@ -431,7 +445,7 @@ def train_l1_selection(
     print("\nTraining LogisticRegressionCV (Elastic Net)...")
     enet_model = LogisticRegressionCV(
         penalty="elasticnet",
-        Cs=5,
+        Cs=ENET_CS_GRID,
         cv=tscv,
         solver="saga",
         l1_ratios=[0.25, 0.5, 0.75],
@@ -588,6 +602,10 @@ def train_l1_selection(
     with open(paths["features_reduced"], "w") as f:
         json.dump(sorted(surviving_features), f, indent=2)
 
+    if export_live_allowlist:
+        live_p = write_ai_live_allowlist_json(surviving_features)
+        print(f"  Live AI allow-list (overwrite): {live_p}")
+
     coef_df.to_csv(paths["coefficients"], index=False)
 
     # Calibration plot
@@ -617,7 +635,9 @@ def train_l1_selection(
 # Full pipeline
 # ======================================================================
 
-def train_pipeline(*, recent_only: bool = False) -> None:
+def train_pipeline(
+    *, recent_only: bool = False, export_live_allowlist: bool = False
+) -> None:
     """Run Phase 1 (L2) then Phase 2 (L1) sharing a single data load."""
     data = _prepare_data(recent_only=recent_only)
 
@@ -629,7 +649,11 @@ def train_pipeline(*, recent_only: bool = False) -> None:
     print("\n" + "=" * 65)
     print("  PHASE 2 -- L1 FEATURE SELECTION (Lasso) & ELASTIC NET")
     print("=" * 65)
-    train_l1_selection(data=data, l2_metrics=l2_metrics)
+    train_l1_selection(
+        data=data,
+        l2_metrics=l2_metrics,
+        export_live_allowlist=export_live_allowlist,
+    )
 
 
 if __name__ == "__main__":
@@ -639,16 +663,21 @@ if __name__ == "__main__":
     flags = {a for a in sys.argv[1:] if a.startswith("--")}
     phase = args[0] if args else "all"
     recent = "--recent" in flags
+    export_live = "--export-live" in flags
 
     if recent:
         print(f"*** --recent mode: only games >= {RECENT_CUTOFF} ***\n")
+    if export_live:
+        print("*** --export-live: write AI/config/l1_allowlist/features_reduced.json ***\n")
 
     if phase == "l2":
         train_l2_baseline(recent_only=recent)
     elif phase == "l1":
-        train_l1_selection(recent_only=recent)
+        train_l1_selection(recent_only=recent, export_live_allowlist=export_live)
     elif phase == "all":
-        train_pipeline(recent_only=recent)
+        train_pipeline(recent_only=recent, export_live_allowlist=export_live)
     else:
-        print(f"Usage: {sys.argv[0]} [l2|l1|all] [--recent]")
+        print(
+            f"Usage: {sys.argv[0]} [l2|l1|all] [--recent] [--export-live]"
+        )
         sys.exit(1)

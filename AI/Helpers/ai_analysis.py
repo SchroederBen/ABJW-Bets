@@ -25,6 +25,8 @@ Matchup conventions:
 
 Important:
 - Use the provided spread fields and precomputed edge fields only as context.
+- If l1_model_features is present, use those numeric pregame fields as the model-aligned
+  stat snapshot (names match offline training); nulls mean that stat was not available live.
 - Treat estimated_edge_points and edge_side as the primary decision inputs.
 - Do not infer a stronger edge than the provided estimated_edge_points.
 - If estimated_edge_points is null, return PASS.

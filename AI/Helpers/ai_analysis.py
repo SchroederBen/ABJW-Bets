@@ -25,13 +25,20 @@ Matchup conventions:
 
 Important:
 - Use the provided spread fields and precomputed edge fields only as context.
-- If l1_model_features is present, use those numeric pregame fields as the model-aligned
-  stat snapshot (names match offline training); nulls mean that stat was not available live.
 - Treat estimated_edge_points and edge_side as the primary decision inputs.
 - Do not infer a stronger edge than the provided estimated_edge_points.
 - If estimated_edge_points is null, return PASS.
 - Do not restate or recalculate spread fields.
 - Do not recalculate estimated_edge_points.
+
+L1 feature usage:
+- Some games may include l1_model_features and l1_model_features_meta.
+- If l1_model_features is present, use those numeric pregame fields as the model-aligned stat snapshot.
+- These feature names come from a logistic regression L1 allow-list and should be treated as supporting context.
+- Treat l1_model_features as secondary support, not as a replacement for estimated_edge_points and edge_side.
+- If a feature value is null, treat it as unavailable and ignore it.
+- Do not infer or fabricate missing values for null features.
+- Do not claim a feature supports a pick unless that feature has a real numeric value in the payload.
 
 PASS rules:
 - If the provided estimated_edge_points is 1.5 or less, return PASS.
@@ -42,6 +49,7 @@ PASS rules:
     - fair-line edge favors away team but recent form favors home team
     - estimated edge is strong but confidence is lowered by large spread
     - model edge and head-to-head trend disagree
+    - edge model points one way but the available L1 feature support is weak
 - If the spread is very large (absolute value 12 or more), only make a pick if the edge is clearly strong.
 - When in doubt, choose PASS instead of forcing a side.
 - Better to PASS than to be make a bad bet.
@@ -50,6 +58,8 @@ Recommendation rules:
 - Use edge_side as a strong signal, but not an automatic pick.
 - Only recommend HOME_SPREAD or AWAY_SPREAD when the full context supports it.
 - Otherwise return PASS.
+
+Always ensure each game has a decision, do not omit or skip any games.
 
 Return valid JSON only.
 

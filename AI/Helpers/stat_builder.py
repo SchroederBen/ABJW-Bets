@@ -197,6 +197,7 @@ def calculate_estimated_edge_v2(home_summary, away_summary, market_home_spread):
         "edge_side": edge_side
     }
 
+
 def calculate_estimated_edge_v3(home_summary, away_summary, market_home_spread):
     if market_home_spread is None:
         return {
@@ -392,7 +393,7 @@ def build_head_to_head_stats(home_team_id, away_team_id, historical_games):
             margin_for_home_team = hs - aws
             home_team_won = hs > aws
 
-            home_cover = calc_home_cover(spread, hs, aws)  
+            home_cover = calc_home_cover(spread, hs, aws)
             away_cover = None if home_cover is None else (not home_cover)
 
             h2h_home_cover = home_cover
@@ -450,6 +451,12 @@ def build_head_to_head_stats(home_team_id, away_team_id, historical_games):
 def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map, historical_games):
     payload = []
 
+    # New:
+    # Load the exported L1 allow-list once before looping through games.
+    # This is just a list of feature names that survived L1 regression.
+    # We do not load model weights here.
+    l1_allow = get_l1_allowlist_from_env()
+
     for g in api_games:
         home_source_id = g["home_source_team_id"]
         away_source_id = g["away_source_team_id"]
@@ -485,7 +492,7 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
             g.get("home_current_spread")
         )
 
-        #which one to use as primary edge info sent to AI
+        # which one to use as primary edge info sent to AI
         active_edge_info = edge_info_v2
 
         h2h_stats = build_head_to_head_stats(
@@ -529,16 +536,36 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
             "edge_model_v3": edge_info_v3,
         }
 
-        # Optional: JSON allow-list from L1 (env AI_L1_FEATURES_JSON) — same names as training
-        l1_allow = get_l1_allowlist_from_env()
+        # Optional: JSON allow-list from L1 (env AI_L1_FEATURES_JSON or default live path)
+        # This adds a model-aligned pregame feature block without removing any of the old payload.
         if l1_allow:
-            game_entry["l1_model_features"] = build_l1_model_features_subset(
+            l1_features = build_l1_model_features_subset(
                 l1_allow,
                 home_team_id,
                 away_team_id,
                 historical_games,
                 g,
             )
+
+            # Track how many allow-listed features could not be computed live.
+            # That usually means the current historical query does not include enough fields.
+            null_feature_count = sum(1 for value in l1_features.values() if value is None)
+
+            game_entry["l1_model_features"] = l1_features
+            game_entry["l1_model_features_meta"] = {
+                "enabled": True,
+                "allowlist_size": len(l1_allow),
+                "computed_feature_count": len(l1_features),
+                "null_feature_count": null_feature_count,
+            }
+        else:
+            # Keep payload shape stable even when L1 is not active.
+            game_entry["l1_model_features_meta"] = {
+                "enabled": False,
+                "allowlist_size": 0,
+                "computed_feature_count": 0,
+                "null_feature_count": 0,
+            }
 
         payload.append(game_entry)
 

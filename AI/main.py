@@ -5,7 +5,11 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
-from Helpers.game_queries import fetch_historical_games, fetch_team_id_map_by_source_id
+from Helpers.game_queries import (
+    fetch_historical_games,
+    fetch_historical_games_with_box_scores,
+    fetch_team_id_map_by_source_id,
+)
 from Helpers.stat_builder import build_team_stats, build_matchup_payload_from_api_games
 from Helpers.ai_analysis import ask_ai_for_spread_picks
 from NBA_APIs import get_today_nba_games
@@ -68,6 +72,7 @@ def append_run_results_to_csv(ai_result):
 
 def main():
     try:
+        print("=== Fetching data ===")
         historical_games = fetch_historical_games(START_DATE)
         todays_api_games = get_today_nba_games()
         source_team_map = fetch_team_id_map_by_source_id()
@@ -84,13 +89,28 @@ def main():
             print("No team source ID mappings found in teams table.")
             return
 
+        # Fetch box-score data (graceful fallback if team_game_stats table
+        # doesn't exist yet or is empty)
+        team_game_rows = None
+        try:
+            team_game_rows = fetch_historical_games_with_box_scores(START_DATE)
+            if team_game_rows:
+                print(f"Loaded {len(team_game_rows)} box-score rows from team_game_stats.")
+            else:
+                print("No box-score rows found — using score-only fallback.")
+                team_game_rows = None
+        except Exception as e:
+            print(f"Could not fetch box-score data (falling back to scores only): {e}")
+            team_game_rows = None
+
         team_stats = build_team_stats(historical_games)
 
         matchup_payload = build_matchup_payload_from_api_games(
             todays_api_games,
             team_stats,
             source_team_map,
-            historical_games
+            historical_games,
+            team_game_rows=team_game_rows,
         )
 
         if not matchup_payload:
@@ -106,10 +126,6 @@ def main():
             print(json.dumps(game.get("head_to_head_stats", {}), indent=2))
             print()
 
-        # New:
-        # Quick debug section so you can verify whether the exported L1 allow-list
-        # was loaded and how many of the allow-listed live features actually computed.
-        # This does not change any betting logic; it only helps you inspect the new layer.
         print("\n=== L1 Feature Preview ===")
         for game in matchup_payload:
             l1_meta = game.get("l1_model_features_meta", {})
@@ -117,9 +133,10 @@ def main():
             if l1_meta.get("enabled"):
                 print(
                     f"{game['matchup']} | "
-                    f"L1 allow-list loaded: {l1_meta.get('allowlist_size', 0)} features | "
+                    f"L1 allow-list: {l1_meta.get('allowlist_size', 0)} features | "
                     f"computed: {l1_meta.get('computed_feature_count', 0)} | "
-                    f"null: {l1_meta.get('null_feature_count', 0)}"
+                    f"null: {l1_meta.get('null_feature_count', 0)} | "
+                    f"source: {l1_meta.get('data_source', '?')}"
                 )
             else:
                 print(f"{game['matchup']} | L1 allow-list not loaded")
@@ -132,42 +149,69 @@ def main():
 
             print(f"Matchup: {sample_game['matchup']}")
 
-            # Print ONLY non-null features so it's readable
             l1_features = sample_game.get("l1_model_features", {})
 
             non_null_features = {
                 k: v for k, v in l1_features.items() if v is not None
             }
 
-            print("\n--- Non-null L1 features ---")
+            print(f"\n--- Non-null L1 features: {len(non_null_features)} ---")
             print(json.dumps(non_null_features, indent=2))
 
-            print("\n--- Null feature count ---")
-            print(
-                sum(1 for v in l1_features.values() if v is None),
-                "null features"
-            )
+            print(f"\n--- Null features: {sum(1 for v in l1_features.values() if v is None)} ---")
 
-        #print("\n=== AI Predictions ===")
-        #print(json.dumps(ai_result, indent=2))
-        #append_run_results_to_csv(ai_result)
-        #print(f"\nSaved run results to CSV: {RUN_LOG_CSV}")
+        # print("\n=== AI Predictions ===")
+        # print(json.dumps(ai_result, indent=2))
+        # append_run_results_to_csv(ai_result)
+        # print(f"\nSaved run results to CSV: {RUN_LOG_CSV}")
 
-        print("\n=== V1 vs V2 Comparison ===")
+        print("\n=== Edge Model Comparison ===")
         for game in matchup_payload:
-            print(
-                f"{game['matchup']} | "
-                f"V1: {game['edge_model_v1']['edge_side']} ({game['edge_model_v1']['estimated_edge_points']}) | "
-                f"V2: {game['edge_model_v2']['edge_side']} ({game['edge_model_v2']['estimated_edge_points']}) | "
-                f"ACTIVE: {game['edge_side']}"
-            )
+            v2 = game.get("edge_model_v2", {})
+            learned = game.get("edge_model_learned", {})
+            l1_score = game.get("l1_model_score", {})
+
+            parts = [
+                f"{game['matchup']}",
+                f"V2: {v2.get('edge_side', '?')} ({v2.get('estimated_edge_points', '?')})",
+            ]
+
+            # Learned model info
+            if learned.get("model_version", "").startswith("stat_builder_weights"):
+                parts.append(
+                    f"Learned: {learned.get('edge_side', '?')} "
+                    f"({learned.get('estimated_edge_points', '?')}) "
+                    f"P(cover)={learned.get('p_home_cover', '?')}"
+                )
+            else:
+                parts.append("Learned: (not loaded)")
+
+            # L1 model score
+            if l1_score.get("l1_score_usable"):
+                parts.append(
+                    f"L1 P(win)={l1_score.get('l1_win_probability', '?')} "
+                    f"conf={l1_score.get('l1_confidence', '?')} "
+                    f"null%={l1_score.get('l1_null_feature_pct', '?')}"
+                )
+            elif l1_score.get("l1_model_available"):
+                parts.append(
+                    f"L1: too many nulls ({l1_score.get('l1_null_feature_pct', '?')})"
+                )
+            else:
+                parts.append("L1 model: not loaded")
+
+            parts.append(f"ACTIVE: {game.get('edge_side', '?')}")
+
+            print(" | ".join(parts))
 
         print("\n=== Human Readable Predictions ===")
         for line in ai_result.get("human_readable", []):
             print(line + "\n")
 
     except Exception as e:
+        import traceback
         print(f"Unexpected error: {e}")
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

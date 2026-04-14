@@ -23,40 +23,51 @@ Matchup conventions:
 - HOME_SPREAD means betting the home team to cover
 - AWAY_SPREAD means betting the away team to cover
 
-Important:
-- Use the provided spread fields and precomputed edge fields only as context.
-- Treat estimated_edge_points and edge_side as the primary decision inputs.
-- Do not infer a stronger edge than the provided estimated_edge_points.
-- If estimated_edge_points is null, return PASS.
-- Do not restate or recalculate spread fields.
-- Do not recalculate estimated_edge_points.
+Decision hierarchy (use all available signals, weighted by reliability):
 
-L1 feature usage:
-- Some games may include l1_model_features and l1_model_features_meta.
-- If l1_model_features is present, use those numeric pregame fields as the model-aligned stat snapshot.
-- These feature names come from a logistic regression L1 allow-list and should be treated as supporting context.
-- Treat l1_model_features as secondary support, not as a replacement for estimated_edge_points and edge_side.
-- If a feature value is null, treat it as unavailable and ignore it.
-- Do not infer or fabricate missing values for null features.
-- Do not claim a feature supports a pick unless that feature has a real numeric value in the payload.
+1. PRIMARY — p_home_cover (if present):
+   A calibrated probability from a trained logistic model with learned weights.
+   Values above 0.5 favor HOME_SPREAD, below 0.5 favor AWAY_SPREAD.
+   The further from 0.5, the stronger the signal.
+   If p_home_cover is between 0.45 and 0.55, the model sees no meaningful edge.
+
+2. SECONDARY — estimated_edge_points and edge_side:
+   Precomputed edge from the stat_builder pipeline. Treat these as strong context.
+   Do not infer a stronger edge than the provided estimated_edge_points.
+   If estimated_edge_points is null, skip this signal.
+
+3. SUPPORTING — l1_model_score (if present and l1_score_usable is true):
+   l1_win_probability is a trained logistic regression probability of home team winning.
+   This predicts the game winner, not spread coverage, so use directionally only.
+   l1_confidence (0-100) indicates how far the probability is from 50/50.
+
+4. CONTEXT — l1_model_features:
+   Numeric pregame rolling averages from the L1 allow-list.
+   Use as a stat snapshot to check if a pick makes sense.
+   If a feature value is null, ignore it. Do not fabricate missing values.
+
+Important:
+- When p_home_cover and edge_side agree, confidence should be higher.
+- When they disagree, default to PASS unless one signal is clearly dominant.
+- Do not restate or recalculate spread fields or model outputs.
 
 PASS rules:
-- If the provided estimated_edge_points is 1.5 or less, return PASS.
+- If p_home_cover is between 0.45 and 0.55 AND estimated_edge_points is 1.5 or less, return PASS.
 - If confidence would be below 60, return PASS.
 - If the matchup signals are mixed or contradictory, return PASS.
-    Do not use vague phrases like "mixed signals" or "conflicting indicators" by themselves.
+    Do not use vague phrases like "mixed signals" by themselves.
     Always name the specific conflict, such as:
-    - fair-line edge favors away team but recent form favors home team
-    - estimated edge is strong but confidence is lowered by large spread
-    - model edge and head-to-head trend disagree
-    - edge model points one way but the available L1 feature support is weak
+    - p_home_cover favors home but edge_side says AWAY_SPREAD
+    - l1_win_probability and p_home_cover disagree on the likely winner
+    - estimated edge is strong but L1 features show weak recent form
+    - model edge points one way but head-to-head trend disagrees
 - If the spread is very large (absolute value 12 or more), only make a pick if the edge is clearly strong.
 - When in doubt, choose PASS instead of forcing a side.
-- Better to PASS than to be make a bad bet.
+- Better to PASS than to make a bad bet.
 
 Recommendation rules:
-- Use edge_side as a strong signal, but not an automatic pick.
-- Only recommend HOME_SPREAD or AWAY_SPREAD when the full context supports it.
+- Use the full weight of available model signals, not just one.
+- Only recommend HOME_SPREAD or AWAY_SPREAD when multiple signals align.
 - Otherwise return PASS.
 
 Always ensure each game has a decision, do not omit or skip any games.

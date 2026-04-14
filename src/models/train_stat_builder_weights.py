@@ -1,3 +1,5 @@
+######## Run from project root: python -m src.models.train_stat_builder_weights #########
+
 """
 Offline training pipeline to learn weights in the same shape as AI/Helpers/stat_builder.py.
 

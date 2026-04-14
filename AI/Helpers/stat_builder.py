@@ -1,9 +1,65 @@
 from collections import defaultdict
+import json
+import math
+from pathlib import Path
+
+import numpy as np
 
 from Helpers.l1_live_features import (
     build_l1_model_features_subset,
+    build_full_feature_row,
     get_l1_allowlist_from_env,
+    score_with_l1_model,
 )
+
+# ======================================================================
+# Trained stat_builder weights loader
+# ======================================================================
+
+_ARTIFACTS_DIR = Path(__file__).resolve().parents[2] / "src" / "models" / "artifacts"
+_cached_trained_weights = None
+_trained_weights_load_attempted = False
+
+
+def _load_trained_weights() -> dict | None:
+    """
+    Load the latest trained stat_builder_weights artifact JSON.
+    Returns the full bundle dict, or None if not found.
+    Caches after first load.
+    """
+    global _cached_trained_weights, _trained_weights_load_attempted
+
+    if _trained_weights_load_attempted:
+        return _cached_trained_weights
+
+    _trained_weights_load_attempted = True
+
+    if not _ARTIFACTS_DIR.is_dir():
+        return None
+
+    candidates = sorted(_ARTIFACTS_DIR.glob("stat_builder_weights_struct_*.json"))
+    if not candidates:
+        print("  No trained stat_builder weights found — using hardcoded v2 weights.")
+        return None
+
+    path = candidates[-1]
+    try:
+        with open(path, encoding="utf-8") as f:
+            _cached_trained_weights = json.load(f)
+        print(f"  Loaded trained stat_builder weights: {path.name}")
+        sb = _cached_trained_weights.get("stat_builder", {})
+        print(
+            f"    w_season={sb.get('w_season', '?'):.4f}  "
+            f"w_site={sb.get('w_site', '?'):.4f}  "
+            f"w_recent={sb.get('w_recent', '?'):.4f}  "
+            f"HCA={sb.get('home_court_advantage', '?'):.4f}  "
+            f"mult={sb.get('margin_mult', '?'):.4f}"
+        )
+    except Exception as e:
+        print(f"  Warning: Could not load trained weights: {e}")
+        _cached_trained_weights = None
+
+    return _cached_trained_weights
 
 
 def calc_home_cover(opening_spread, home_score, away_score):
@@ -249,6 +305,98 @@ def calculate_estimated_edge_v3(home_summary, away_summary, market_home_spread):
     }
 
 
+def calculate_estimated_edge_learned(home_summary, away_summary, market_home_spread):
+    """
+    Edge calculation using trained weights from train_stat_builder_weights.
+
+    Uses optimized blend weights, home court advantage, and margin multiplier
+    learned via L-BFGS-B minimization of log-loss on historical ATS data.
+    Includes a logistic head that maps projected margin + spread to P(home covers),
+    plus a learned tau threshold for PASS decisions.
+
+    Falls back to v2 (hardcoded) if no trained weights artifact is found.
+    """
+    trained = _load_trained_weights()
+
+    if trained is None or market_home_spread is None:
+        # Fallback: use v2 if no trained weights
+        if market_home_spread is None:
+            return {
+                "projected_home_margin": None,
+                "fair_home_spread": None,
+                "spread_diff": None,
+                "p_home_cover": None,
+                "estimated_edge_points": None,
+                "edge_side": "PASS",
+                "model_version": "fallback_v2",
+            }
+        return {
+            **calculate_estimated_edge_v2(home_summary, away_summary, market_home_spread),
+            "p_home_cover": None,
+            "model_version": "fallback_v2",
+        }
+
+    sb = trained.get("stat_builder", {})
+    logit_head = trained.get("logit_head", {})
+    mapping = trained.get("mapping", {})
+
+    w_season = sb.get("w_season", 0.60)
+    w_site = sb.get("w_site", 0.25)
+    w_recent = sb.get("w_recent", 0.15)
+    hca = sb.get("home_court_advantage", 1.5)
+    margin_mult = sb.get("margin_mult", 1.10)
+    logit_scale = logit_head.get("scale", 0.11)
+    logit_bias = logit_head.get("bias", 0.0)
+    tau = mapping.get("tau", 0.05)
+    k_edge_points = mapping.get("k_edge_points", 20.0)
+
+    vals = _get_strength_inputs(home_summary, away_summary)
+
+    home_strength = (
+        w_season * vals["home_season_pd"] +
+        w_site * vals["home_site_pd"] +
+        w_recent * vals["home_recent_pd"]
+    )
+
+    away_strength = (
+        w_season * vals["away_season_pd"] +
+        w_site * vals["away_site_pd"] +
+        w_recent * vals["away_recent_pd"]
+    )
+
+    inner_diff = home_strength - away_strength
+    projected_home_margin = round(margin_mult * (inner_diff + hca), 3)
+    fair_home_spread = round(-projected_home_margin, 3)
+    spread_diff = round(fair_home_spread - market_home_spread, 3)
+
+    # Logistic head: p(home covers) = sigmoid(bias + scale * (margin + spread))
+    logit = logit_bias + logit_scale * (projected_home_margin + market_home_spread)
+    logit = max(-60.0, min(60.0, logit))
+    p_home_cover = 1.0 / (1.0 + math.exp(-logit))
+
+    # Edge points from probability
+    edge_prob = abs(p_home_cover - 0.5)
+    estimated_edge_points = round(edge_prob * k_edge_points, 3)
+
+    # Decision using learned tau
+    if p_home_cover >= (0.5 + tau):
+        edge_side = "HOME_SPREAD"
+    elif p_home_cover <= (0.5 - tau):
+        edge_side = "AWAY_SPREAD"
+    else:
+        edge_side = "PASS"
+
+    return {
+        "projected_home_margin": projected_home_margin,
+        "fair_home_spread": fair_home_spread,
+        "spread_diff": spread_diff,
+        "p_home_cover": round(p_home_cover, 4),
+        "estimated_edge_points": estimated_edge_points,
+        "edge_side": edge_side,
+        "model_version": trained.get("model_version", "trained"),
+    }
+
+
 def summarize_team(team_id, stats):
     recent_n = 5
 
@@ -448,14 +596,44 @@ def build_head_to_head_stats(home_team_id, away_team_id, historical_games):
     }
 
 
-def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map, historical_games):
+def build_matchup_payload_from_api_games(
+    api_games,
+    team_stats,
+    source_team_map,
+    historical_games,
+    team_game_rows=None,
+):
+    """
+    Build the matchup payload sent to the AI.
+
+    Parameters
+    ----------
+    api_games : list[dict]
+        Today's games from the NBA API.
+    team_stats : dict
+        Aggregated season stats per team_id (from build_team_stats).
+    source_team_map : dict
+        Mapping from source_team_id -> {team_id, team_name, team_abbrev}.
+    historical_games : list[dict]
+        Score-only game rows (fallback for features).
+    team_game_rows : list[dict] | None
+        Box-score rows from fetch_historical_games_with_box_scores.
+        When provided, enables full L1 feature computation (FG%, 3PT%, etc.).
+    """
     payload = []
 
-    # New:
-    # Load the exported L1 allow-list once before looping through games.
-    # This is just a list of feature names that survived L1 regression.
-    # We do not load model weights here.
+    # Load L1 allow-list and attempt to load the trained L1 model
     l1_allow = get_l1_allowlist_from_env()
+
+    # Pre-load the L1 model so we only print the load message once
+    from Helpers.l1_live_features import load_l1_model_and_scaler
+    l1_model, l1_scaler, l1_feature_cols = load_l1_model_and_scaler()
+
+    has_box_scores = team_game_rows is not None and len(team_game_rows) > 0
+    if has_box_scores:
+        print(f"  Box-score rows available: {len(team_game_rows)} team-game rows")
+    else:
+        print("  No box-score rows — L1 features will use score-only fallback")
 
     for g in api_games:
         home_source_id = g["home_source_team_id"]
@@ -474,6 +652,7 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
         home_summary = summarize_team(home_team_id, team_stats[home_team_id])
         away_summary = summarize_team(away_team_id, team_stats[away_team_id])
 
+        # Edge calculations — all versions for comparison
         edge_info_v1 = calculate_estimated_edge(
             home_summary,
             away_summary,
@@ -492,8 +671,18 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
             g.get("home_current_spread")
         )
 
-        # which one to use as primary edge info sent to AI
-        active_edge_info = edge_info_v2
+        # Learned edge (uses trained weights if available, else falls back to v2)
+        edge_info_learned = calculate_estimated_edge_learned(
+            home_summary,
+            away_summary,
+            g.get("home_current_spread")
+        )
+
+        # Use learned edge as primary if trained weights loaded, else v2
+        if edge_info_learned.get("model_version", "").startswith("stat_builder_weights"):
+            active_edge_info = edge_info_learned
+        else:
+            active_edge_info = edge_info_v2
 
         h2h_stats = build_head_to_head_stats(
             home_team_id,
@@ -524,31 +713,35 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
             "away_stats": away_summary,
             "head_to_head_stats": h2h_stats,
 
-            # fields AI currently expects
+            # Primary edge fields sent to AI
             "projected_home_margin": active_edge_info["projected_home_margin"],
             "fair_home_spread": active_edge_info["fair_home_spread"],
             "estimated_edge_points": active_edge_info["estimated_edge_points"],
             "edge_side": active_edge_info["edge_side"],
 
-            # keep both for testing
+            # Keep all versions for testing / comparison
             "edge_model_v1": edge_info_v1,
             "edge_model_v2": edge_info_v2,
             "edge_model_v3": edge_info_v3,
+            "edge_model_learned": edge_info_learned,
         }
 
-        # Optional: JSON allow-list from L1 (env AI_L1_FEATURES_JSON or default live path)
-        # This adds a model-aligned pregame feature block without removing any of the old payload.
+        # P(home covers) from the learned model
+        if edge_info_learned.get("p_home_cover") is not None:
+            game_entry["p_home_cover"] = edge_info_learned["p_home_cover"]
+            game_entry["edge_model_version"] = edge_info_learned.get("model_version", "unknown")
+
+        # ---- L1 model features (allow-list subset for AI context) ----
         if l1_allow:
             l1_features = build_l1_model_features_subset(
                 l1_allow,
                 home_team_id,
                 away_team_id,
+                team_game_rows if has_box_scores else None,
                 historical_games,
                 g,
             )
 
-            # Track how many allow-listed features could not be computed live.
-            # That usually means the current historical query does not include enough fields.
             null_feature_count = sum(1 for value in l1_features.values() if value is None)
 
             game_entry["l1_model_features"] = l1_features
@@ -557,15 +750,33 @@ def build_matchup_payload_from_api_games(api_games, team_stats, source_team_map,
                 "allowlist_size": len(l1_allow),
                 "computed_feature_count": len(l1_features),
                 "null_feature_count": null_feature_count,
+                "data_source": "box_scores" if has_box_scores else "scores_only",
             }
         else:
-            # Keep payload shape stable even when L1 is not active.
             game_entry["l1_model_features_meta"] = {
                 "enabled": False,
                 "allowlist_size": 0,
                 "computed_feature_count": 0,
                 "null_feature_count": 0,
+                "data_source": "none",
             }
+
+        # ---- L1 model scoring (actual probability from trained model) ----
+        if l1_model is not None:
+            full_row = build_full_feature_row(
+                home_team_id,
+                away_team_id,
+                team_game_rows if has_box_scores else None,
+                historical_games,
+                g,
+            )
+            l1_score = score_with_l1_model(full_row)
+            if l1_score is not None:
+                game_entry["l1_model_score"] = l1_score
+            else:
+                game_entry["l1_model_score"] = {"l1_model_available": False}
+        else:
+            game_entry["l1_model_score"] = {"l1_model_available": False}
 
         payload.append(game_entry)
 

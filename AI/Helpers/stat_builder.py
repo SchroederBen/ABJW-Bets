@@ -226,16 +226,16 @@ def calculate_estimated_edge_v2(home_summary, away_summary, market_home_spread):
 
     adjusted_spread_diff = spread_diff
     if abs(market_home_spread) >= 10:
-        adjusted_spread_diff *= 0.80
-    elif abs(market_home_spread) >= 7:
         adjusted_spread_diff *= 0.90
+    elif abs(market_home_spread) >= 7:
+        adjusted_spread_diff *= 0.95
 
     adjusted_spread_diff = round(adjusted_spread_diff, 3)
     estimated_edge_points = round(abs(adjusted_spread_diff), 3)
 
-    threshold = 2.5
+    threshold = 1.5
     if abs(market_home_spread) >= 10:
-        threshold = 3.5
+        threshold = 2.5
 
     if abs(adjusted_spread_diff) <= threshold:
         edge_side = "PASS"
@@ -289,7 +289,7 @@ def calculate_estimated_edge_v3(home_summary, away_summary, market_home_spread):
     spread_diff = round(fair_home_spread - market_home_spread, 3)
     estimated_edge_points = round(abs(spread_diff), 3)
 
-    if abs(spread_diff) <= 2.5:
+    if abs(spread_diff) <= 1.5:
         edge_side = "PASS"
     elif spread_diff < 0:
         edge_side = "HOME_SPREAD"

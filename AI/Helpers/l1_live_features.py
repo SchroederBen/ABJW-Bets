@@ -1,18 +1,29 @@
 """
-Live L1 / model feature alignment for AI matchup payloads.
+Live win-model feature alignment for AI matchup payloads.
 
-Loads a JSON allow-list (same shape as l1_feature_selection ``*_features_reduced_*.json``:
-a list of feature name strings). Computes game-level values from ``team_game_rows``
-using the full box-score stats returned by ``fetch_historical_games_with_box_scores``.
+Responsibilities (two separate jobs):
 
-Now computes ALL training-aligned features:
+1. Allow-list (feature-name spec) — still sourced from L1 artifacts:
+   loads a JSON list of feature names (same shape as
+   ``l1_feature_selection *_features_reduced_*.json``) and computes
+   game-level values from ``team_game_rows`` / historical scores.
+
+2. Scoring — loads the trained Elastic Net model to produce the
+   ``l1_model_score`` block (``l1_win_probability`` etc.). ENet shares the
+   same scaler and training-column order as the L1 model (they are fit
+   inside the same training function on the same ``X_train_scaled``),
+   so we load ENet for scoring while keeping L1's scaler + features_all
+   JSON for alignment.
+
+   The block key name (``l1_model_score``) and its field names are kept
+   unchanged so the AI prompt does not need to be updated.
+
+Computed features include:
   - Rolling MAs for box-score stats (field_goal_pct, three_pt_pct, assists, etc.)
   - Rolling MAs for score-derived stats (points, team_score, opponent_score, team_win)
   - days_rest
   - opp_* (opponent's rolling stats)
   - diff_* (home minus away for every parallel feature)
-
-Also supports loading the trained L1 model + scaler for direct probability scoring.
 
 Environment:
   AI_L1_FEATURES_JSON — optional path override to a JSON list of feature names.
@@ -112,9 +123,20 @@ _l1_model_load_attempted = False
 
 def load_l1_model_and_scaler() -> tuple[Any, Any, list[str] | None]:
     """
-    Load the trained L1 model, scaler, and feature column list from artifacts.
-    Returns (model, scaler, feature_cols) or (None, None, None) if not found.
-    Caches after first load.
+    Load the trained Elastic Net model (for scoring) + the L1 scaler and
+    training column order (for alignment), and return them as
+    (model, scaler, feature_cols). Returns (None, None, None) if any piece
+    is missing.
+
+    Why ENet here but L1 elsewhere: ENet is trained on the same
+    ``X_train_scaled`` in the same function call as the L1 model, so it
+    reuses the L1-named scaler and features_all artifacts. The L1 allow-list
+    (``features_reduced.json``) remains the source of the AI context feature
+    subset — this function only changes WHICH model produces the probability.
+
+    The function name and cached globals keep their historical ``l1_`` prefix
+    so ``stat_builder.py`` and the AI prompt continue to refer to
+    ``l1_model_score`` / ``l1_win_probability`` without change.
     """
     global _cached_l1_model, _cached_l1_scaler, _cached_l1_feature_cols
     global _l1_model_load_attempted
@@ -127,11 +149,9 @@ def load_l1_model_and_scaler() -> tuple[Any, Any, list[str] | None]:
     if not _ARTIFACTS_DIR.is_dir():
         return None, None, None
 
-    # Find actual model file (not scaler, not calibration png)
-    model_candidates = sorted(
-        p for p in _ARTIFACTS_DIR.glob("l1_selection_*.joblib")
-        if "scaler" not in p.name and "calibration" not in p.name
-    )
+    # Scoring model: Elastic Net (trained alongside L1, uses same scaler/features)
+    model_candidates = sorted(_ARTIFACTS_DIR.glob("elastic_net_*.joblib"))
+    # Scaler + training column order are saved by the L1 phase and shared with ENet
     scaler_candidates = sorted(_ARTIFACTS_DIR.glob("l1_selection_scaler_*.joblib"))
     features_all_candidates = sorted(_ARTIFACTS_DIR.glob("l1_selection_features_all_*.json"))
 
@@ -140,7 +160,7 @@ def load_l1_model_and_scaler() -> tuple[Any, Any, list[str] | None]:
     features_all_path = features_all_candidates[-1] if features_all_candidates else None
 
     if not model_path or not scaler_path or not features_all_path:
-        print("  L1 model artifacts not found — model scoring disabled.")
+        print("  Win-model artifacts not found (need elastic_net_*.joblib + L1 scaler/features) — scoring disabled.")
         return None, None, None
 
     try:
@@ -148,11 +168,11 @@ def load_l1_model_and_scaler() -> tuple[Any, Any, list[str] | None]:
         _cached_l1_scaler = joblib.load(scaler_path)
         with open(features_all_path, encoding="utf-8") as f:
             _cached_l1_feature_cols = json.load(f)
-        print(f"  Loaded L1 model: {model_path.name}")
-        print(f"  Loaded L1 scaler: {scaler_path.name}")
-        print(f"  L1 feature columns: {len(_cached_l1_feature_cols)}")
+        print(f"  Loaded win model (ElasticNet): {model_path.name}")
+        print(f"  Loaded scaler: {scaler_path.name}")
+        print(f"  Feature columns: {len(_cached_l1_feature_cols)}")
     except Exception as e:
-        print(f"  Warning: Could not load L1 model artifacts: {e}")
+        print(f"  Warning: Could not load win-model artifacts: {e}")
         _cached_l1_model = None
         _cached_l1_scaler = None
         _cached_l1_feature_cols = None

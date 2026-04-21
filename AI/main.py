@@ -117,8 +117,8 @@ def main():
             print("No matchups could be built from API games and DB team mappings.")
             return
 
-        # print("=== Matchup payload sent to AI ===")
-        # print(json.dumps(matchup_payload, indent=2, default=str))
+        print("=== Matchup payload sent to AI ===")
+        print(json.dumps(matchup_payload, indent=2, default=str))
 
         print("\n=== Head-to-Head Stats ===")
         for game in matchup_payload:

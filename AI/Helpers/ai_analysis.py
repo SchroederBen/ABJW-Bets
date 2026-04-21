@@ -26,39 +26,63 @@ Matchup conventions:
 Decision hierarchy (use all available signals, weighted by reliability):
 
 1. PRIMARY — p_home_cover (if present):
-   A calibrated probability from a trained logistic model with learned weights.
+   A calibrated probability from the stat_builder learned logit head.
    Values above 0.5 favor HOME_SPREAD, below 0.5 favor AWAY_SPREAD.
    The further from 0.5, the stronger the signal.
-   If p_home_cover is between 0.45 and 0.55, the model sees no meaningful edge.
+   If p_home_cover is between 0.45 and 0.55, treat as no meaningful edge.
 
-2. SECONDARY — estimated_edge_points and edge_side:
-   Precomputed edge from the stat_builder pipeline. Treat these as strong context.
+2. PRIMARY — estimated_edge_points and edge_side:
+   Precomputed edge from the stat_builder pipeline. Treat as strong context.
    Do not infer a stronger edge than the provided estimated_edge_points.
    If estimated_edge_points is null, skip this signal.
 
-3. SUPPORTING — l1_model_score (if present and l1_score_usable is true):
-   l1_win_probability is a trained logistic regression probability of home team winning.
-   This predicts the game winner, not spread coverage, so use directionally only.
-   l1_confidence (0-100) indicates how far the probability is from 50/50.
+3. SUPPORTING (optional) — cover_model_score (if present and cover_score_usable is true):
+   An independent trained logistic regression predicting home cover.
+   Its historical accuracy is modest, so use ONLY as corroboration —
+   it may reinforce a pick that the PRIMARY signals already support, or
+   raise a soft flag when it strongly contradicts them.
+   DO NOT let cover_model_score flip a decision that the PRIMARY signals
+   clearly support, and DO NOT create a pick from this signal alone.
+   Ignore when cover_confidence is low (under ~15) or cover_null_feature_pct
+   is elevated.
 
-4. CONTEXT — l1_model_features:
+4. SUPPORTING (optional) — l1_model_score (if present and l1_score_usable is true):
+   l1_win_probability is a trained logistic regression probability of home
+   team winning (game winner, not spread). Its historical accuracy is modest,
+   so use ONLY as directional corroboration of the PRIMARY signals.
+   DO NOT let l1_model_score flip a PRIMARY-supported decision, and DO NOT
+   create a pick from this signal alone.
+   Ignore when l1_confidence is low (under ~15) or l1_null_feature_pct is
+   elevated.
+
+5. CONTEXT — l1_model_features:
    Numeric pregame rolling averages from the L1 allow-list.
    Use as a stat snapshot to check if a pick makes sense.
    If a feature value is null, ignore it. Do not fabricate missing values.
 
 Important:
-- When p_home_cover and edge_side agree, confidence should be higher.
-- When they disagree, default to PASS unless one signal is clearly dominant.
+- The decision must be driven by the PRIMARY signals (p_home_cover and
+  estimated_edge_points / edge_side). SUPPORTING models only adjust confidence.
+- When a SUPPORTING model agrees with the PRIMARY direction, you may raise
+  confidence modestly.
+- When a SUPPORTING model disagrees, you may lower confidence, but do not
+  flip the side based on it alone.
+- Ignore SUPPORTING models entirely when their confidence is weak or many
+  features are null — their accuracy is not strong enough to outweigh PRIMARY.
 - Do not restate or recalculate spread fields or model outputs.
 
 PASS rules:
-- If p_home_cover is between 0.45 and 0.55 AND estimated_edge_points is 1.5 or less, return PASS.
+- If p_home_cover is between 0.45 and 0.55 AND estimated_edge_points is 1.5
+  or less, return PASS.
 - If confidence would be below 60, return PASS.
+- If the PRIMARY signals disagree with each other (p_home_cover favors one
+  side but edge_side names the other), return PASS.
+- Do not PASS solely because a SUPPORTING model disagrees with the PRIMARY
+  signals — only lower confidence.
 - If the matchup signals are mixed or contradictory, return PASS.
     Do not use vague phrases like "mixed signals" by themselves.
     Always name the specific conflict, such as:
     - p_home_cover favors home but edge_side says AWAY_SPREAD
-    - l1_win_probability and p_home_cover disagree on the likely winner
     - estimated edge is strong but L1 features show weak recent form
     - model edge points one way but head-to-head trend disagrees
 - If the spread is very large (absolute value 12 or more), only make a pick if the edge is clearly strong.

@@ -11,6 +11,10 @@ from Helpers.l1_live_features import (
     get_l1_allowlist_from_env,
     score_with_l1_model,
 )
+from Helpers.cover_model_live import (
+    load_cover_model_and_scaler,
+    score_with_cover_model,
+)
 
 # ======================================================================
 # Trained stat_builder weights loader
@@ -625,9 +629,10 @@ def build_matchup_payload_from_api_games(
     # Load L1 allow-list and attempt to load the trained L1 model
     l1_allow = get_l1_allowlist_from_env()
 
-    # Pre-load the L1 model so we only print the load message once
+    # Pre-load the L1 and cover models so we only print load messages once
     from Helpers.l1_live_features import load_l1_model_and_scaler
     l1_model, l1_scaler, l1_feature_cols = load_l1_model_and_scaler()
+    cover_model, cover_scaler, cover_feature_cols = load_cover_model_and_scaler()
 
     has_box_scores = team_game_rows is not None and len(team_game_rows) > 0
     if has_box_scores:
@@ -761,8 +766,8 @@ def build_matchup_payload_from_api_games(
                 "data_source": "none",
             }
 
-        # ---- L1 model scoring (actual probability from trained model) ----
-        if l1_model is not None:
+        # ---- Model scoring (L1 win + cover models share the same pregame row) ----
+        if l1_model is not None or cover_model is not None:
             full_row = build_full_feature_row(
                 home_team_id,
                 away_team_id,
@@ -770,13 +775,24 @@ def build_matchup_payload_from_api_games(
                 historical_games,
                 g,
             )
+        else:
+            full_row = None
+
+        if l1_model is not None and full_row is not None:
             l1_score = score_with_l1_model(full_row)
-            if l1_score is not None:
-                game_entry["l1_model_score"] = l1_score
-            else:
-                game_entry["l1_model_score"] = {"l1_model_available": False}
+            game_entry["l1_model_score"] = (
+                l1_score if l1_score is not None else {"l1_model_available": False}
+            )
         else:
             game_entry["l1_model_score"] = {"l1_model_available": False}
+
+        if cover_model is not None and full_row is not None:
+            cover_score = score_with_cover_model(full_row)
+            game_entry["cover_model_score"] = (
+                cover_score if cover_score is not None else {"cover_model_available": False}
+            )
+        else:
+            game_entry["cover_model_score"] = {"cover_model_available": False}
 
         payload.append(game_entry)
 

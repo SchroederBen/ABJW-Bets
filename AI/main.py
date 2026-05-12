@@ -70,6 +70,55 @@ def append_run_results_to_csv(ai_result):
         writer.writerows(rows)
 
 
+def print_human_readable_predictions(ai_result):
+    predictions = ai_result.get("predictions", [])
+    human_lines = ai_result.get("human_readable", [])
+
+    print("\n" + "=" * 70)
+    print(" NBA SPREAD PICKS")
+    print("=" * 70)
+
+    if predictions:
+        for index, prediction in enumerate(predictions, start=1):
+            matchup = prediction.get("matchup", "Unknown Matchup")
+            recommended_bet = prediction.get("recommended_bet", "PASS")
+            confidence = prediction.get("confidence", "N/A")
+            estimated_edge = prediction.get("estimated_edge_points", "N/A")
+            projected_margin = prediction.get("projected_home_margin", "N/A")
+            fair_home_spread = prediction.get("fair_home_spread", "N/A")
+            short_reason = prediction.get("short_reason", "No reason provided.")
+            risk_flags = prediction.get("risk_flags", [])
+
+            print(f"\n{index}. {matchup}")
+            print("-" * 70)
+            print(f"Pick:              {recommended_bet}")
+            print(f"Confidence:        {confidence}")
+            print(f"Estimated Edge:    {estimated_edge}")
+            print(f"Projected Margin:  {projected_margin}")
+            print(f"Fair Home Spread:  {fair_home_spread}")
+            print()
+            print(f"Reason: {short_reason}")
+
+            if risk_flags:
+                print("\nRisk Flags:")
+                for flag in risk_flags:
+                    print(f"  - {flag}")
+            else:
+                print("\nRisk Flags: None")
+
+        print("\n" + "=" * 70)
+        return
+
+    if human_lines:
+        for index, line in enumerate(human_lines, start=1):
+            print(f"\n{index}. {line}")
+        print("\n" + "=" * 70)
+        return
+
+    print("\nNo human-readable predictions returned.")
+    print("=" * 70)
+
+
 def main():
     try:
         print("=== Fetching data ===")
@@ -204,9 +253,7 @@ def main():
 
             print(" | ".join(parts))
 
-        print("\n=== Human Readable Predictions ===")
-        for line in ai_result.get("human_readable", []):
-            print(line + "\n")
+        print_human_readable_predictions(ai_result)
 
     except Exception as e:
         import traceback

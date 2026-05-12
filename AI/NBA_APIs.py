@@ -8,12 +8,26 @@ ODDS_URL = "https://cdn.nba.com/static/json/liveData/odds/odds_todaysGames.json"
 
 def safe_get_json(url):
     try:
-        response = requests.get(url, timeout=10)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.nba.com/",
+            "Origin": "https://www.nba.com",
+        }
+
+        response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         return response.json()
+
     except requests.RequestException as e:
         print(f"Error fetching {url}: {e}")
         return None
+
     except ValueError:
         print(f"Error: {url} did not return valid JSON.")
         return None

@@ -4,19 +4,35 @@ from tkinter import scrolledtext, ttk
 from pathlib import Path
 import threading
 import queue
+import re
 
 
-def extract_human_predictions(full_output: str):
-    marker = "=== Human Readable Predictions ==="
-    if marker not in full_output:
-        return []
+def extract_prediction_blocks(full_output: str):
+    if "=== Human Readable Predictions ===" in full_output:
+        section = full_output.split("=== Human Readable Predictions ===", 1)[1].strip()
+        lines = [line.strip() for line in section.splitlines() if line.strip()]
+        return ("human_readable", lines)
 
-    section = full_output.split(marker, 1)[1].strip()
-    lines = [line.strip() for line in section.splitlines() if line.strip()]
-    return lines
+    if "NBA SPREAD PICKS" in full_output:
+        section = full_output.split("NBA SPREAD PICKS", 1)[1]
+
+        raw_blocks = re.split(r"\n\s*\d+\.\s+", section)
+        parsed_blocks = []
+
+        for block in raw_blocks:
+            block = block.strip()
+            if not block:
+                continue
+            if "Pick:" not in block:
+                continue
+            parsed_blocks.append(block)
+
+        return ("spread_blocks", parsed_blocks)
+
+    return ("none", [])
 
 
-def parse_prediction_line(line: str):
+def parse_human_prediction_line(line: str):
     parts = [p.strip() for p in line.split(" | ")]
 
     data = {
@@ -42,6 +58,35 @@ def parse_prediction_line(line: str):
             data["reason"] = part.replace("Reason:", "", 1).strip()
         elif part.startswith("Risk Flags:"):
             data["risk_flags"] = part.replace("Risk Flags:", "", 1).strip()
+
+    return data
+
+
+def parse_spread_pick_block(block: str):
+    data = {
+        "matchup": "",
+        "bet": "",
+        "confidence": "",
+        "edge": "",
+        "reason": "",
+        "risk_flags": "",
+    }
+
+    lines = [line.strip() for line in block.splitlines() if line.strip()]
+
+    if lines:
+        data["matchup"] = lines[0]
+
+    def extract_value(label):
+        pattern = rf"{re.escape(label)}\s*(.+)"
+        match = re.search(pattern, block)
+        return match.group(1).strip() if match else ""
+
+    data["bet"] = extract_value("Pick:")
+    data["confidence"] = extract_value("Confidence:")
+    data["edge"] = extract_value("Estimated Edge:")
+    data["reason"] = extract_value("Reason:")
+    data["risk_flags"] = extract_value("Risk Flags:")
 
     return data
 
@@ -170,15 +215,27 @@ def make_card(parent, prediction):
 def update_progress_from_line(line: str):
     text = line.strip()
 
-    if "=== Head-to-Head Stats ===" in text:
+    if "=== Fetching data ===" in text:
+        set_stage_status("Fetching data")
+        progress_var.set(15)
+    elif "=== Head-to-Head Stats ===" in text:
         set_stage_status("Building matchup stats")
         progress_var.set(35)
+    elif "=== L1 Feature Preview ===" in text:
+        set_stage_status("Preparing L1 features")
+        progress_var.set(55)
     elif "=== AI Predictions ===" in text:
         set_stage_status("Generating AI predictions")
         progress_var.set(65)
+    elif "=== Edge Model Comparison ===" in text:
+        set_stage_status("Comparing model outputs")
+        progress_var.set(80)
+    elif "NBA SPREAD PICKS" in text:
+        set_stage_status("Formatting final output")
+        progress_var.set(100)
     elif "Saved run results to CSV" in text:
         set_stage_status("Saving results")
-        progress_var.set(85)
+        progress_var.set(90)
     elif "=== V1 vs V2 Comparison ===" in text:
         set_stage_status("Comparing model versions")
         progress_var.set(92)
@@ -291,15 +348,18 @@ def finish_run(return_code, full_output):
         ).pack(fill=tk.X, pady=(4, 0))
         return
 
-    lines = extract_human_predictions(full_output)
+    mode, blocks = extract_prediction_blocks(full_output)
 
-    if not lines:
+    if not blocks:
         status_var.set("Run completed, but no predictions were found")
         clear_cards_container()
         show_placeholder("No readable predictions found.")
         return
 
-    parsed_predictions = [parse_prediction_line(line) for line in lines]
+    if mode == "human_readable":
+        parsed_predictions = [parse_human_prediction_line(line) for line in blocks]
+    else:
+        parsed_predictions = [parse_spread_pick_block(block) for block in blocks]
 
     clear_cards_container()
 

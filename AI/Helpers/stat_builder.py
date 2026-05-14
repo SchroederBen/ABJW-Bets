@@ -1,0 +1,1045 @@
+from collections import defaultdict
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+
+from Helpers.l1_live_features import (
+    build_l1_model_features_subset,
+    build_full_feature_row,
+    get_l1_allowlist_from_env,
+    score_with_l1_model,
+)
+
+# ======================================================================
+# Trained stat_builder weights loader
+# ======================================================================
+
+_ARTIFACTS_DIR = Path(__file__).resolve().parents[2] / "src" / "models" / "artifacts"
+_cached_trained_weights = None
+_trained_weights_load_attempted = False
+
+
+def _load_trained_weights() -> dict | None:
+    """
+    Load the latest trained stat_builder_weights artifact JSON.
+    Returns the full bundle dict, or None if not found.
+    Caches after first load.
+    """
+    global _cached_trained_weights, _trained_weights_load_attempted
+
+    if _trained_weights_load_attempted:
+        return _cached_trained_weights
+
+    _trained_weights_load_attempted = True
+
+    if not _ARTIFACTS_DIR.is_dir():
+        return None
+
+    candidates = sorted(_ARTIFACTS_DIR.glob("stat_builder_weights_struct_*.json"))
+    if not candidates:
+        print("  No trained stat_builder weights found — using hardcoded v2 weights.")
+        return None
+
+    path = candidates[-1]
+    try:
+        with open(path, encoding="utf-8") as f:
+            _cached_trained_weights = json.load(f)
+        print(f"  Loaded trained stat_builder weights: {path.name}")
+        sb = _cached_trained_weights.get("stat_builder", {})
+        print(
+            f"    w_season={sb.get('w_season', '?'):.4f}  "
+            f"w_site={sb.get('w_site', '?'):.4f}  "
+            f"w_recent={sb.get('w_recent', '?'):.4f}  "
+            f"HCA={sb.get('home_court_advantage', '?'):.4f}  "
+            f"mult={sb.get('margin_mult', '?'):.4f}"
+        )
+    except Exception as e:
+        print(f"  Warning: Could not load trained weights: {e}")
+        _cached_trained_weights = None
+
+    return _cached_trained_weights
+
+
+def calc_home_cover(opening_spread, home_score, away_score):
+    if opening_spread is None:
+        return None
+
+    mov = home_score - away_score
+    return (mov + opening_spread) > 0
+
+
+def init_team_stats():
+    return {
+        "games": 0,
+        "wins": 0,
+        "losses": 0,
+        "pts_for": 0,
+        "pts_against": 0,
+        "point_diff_total": 0,
+
+        "home_games": 0,
+        "home_wins": 0,
+        "home_pts_for": 0,
+        "home_pts_against": 0,
+
+        "away_games": 0,
+        "away_wins": 0,
+        "away_pts_for": 0,
+        "away_pts_against": 0,
+
+        "ats_games": 0,
+        "ats_wins": 0,
+
+        "recent_results": [],
+        "recent_point_diff": [],
+        "recent_pts_for": [],
+        "recent_pts_against": [],
+        "recent_ats": []
+    }
+
+
+def avg(nums):
+    return round(sum(nums) / len(nums), 3) if nums else None
+
+
+def pct(num, den):
+    return round(num / den, 3) if den else None
+
+
+def nz(value, default=0.0):
+    return default if value is None else value
+
+
+def safe_diff(a, b):
+    if a is None or b is None:
+        return None
+    return round(a - b, 3)
+
+
+def first_not_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def total_rebounds_from_features(prefix, features):
+    total_5 = features.get(f"{prefix}total_rebounds_MA_5")
+    if total_5 is not None:
+        return total_5
+
+    off_5 = features.get(f"{prefix}offensive_rebounds_MA_5")
+    def_5 = features.get(f"{prefix}defensive_rebounds_MA_5")
+    if off_5 is not None and def_5 is not None:
+        return round(off_5 + def_5, 3)
+
+    total_3 = features.get(f"{prefix}total_rebounds_MA_3")
+    if total_3 is not None:
+        return total_3
+
+    off_3 = features.get(f"{prefix}offensive_rebounds_MA_3")
+    def_3 = features.get(f"{prefix}defensive_rebounds_MA_3")
+    if off_3 is not None and def_3 is not None:
+        return round(off_3 + def_3, 3)
+
+    return None
+
+
+def clamp_probability(value, low=0.01, high=0.99):
+    if value is None:
+        return None
+    return max(low, min(high, value))
+
+
+def probability_to_american_odds(probability):
+    if probability is None or probability <= 0 or probability >= 1:
+        return None
+
+    if probability >= 0.5:
+        return int(round(-100 * probability / (1 - probability)))
+
+    return int(round(100 * (1 - probability) / probability))
+
+
+def american_odds_profit_per_unit(odds):
+    if odds is None:
+        return None
+
+    if odds > 0:
+        return odds / 100.0
+
+    if odds < 0:
+        return 100.0 / abs(odds)
+
+    return None
+
+
+def expected_value_per_unit(win_probability, american_odds):
+    if win_probability is None or american_odds is None:
+        return None
+
+    profit_if_win = american_odds_profit_per_unit(american_odds)
+    if profit_if_win is None:
+        return None
+
+    lose_probability = 1.0 - win_probability
+    ev = (win_probability * profit_if_win) - lose_probability
+    return round(ev, 4)
+
+
+def estimate_cover_probability(projected_home_margin, market_home_spread, logit_scale=0.11, logit_bias=0.0):
+    if projected_home_margin is None or market_home_spread is None:
+        return None
+
+    # same basic form already used by the learned head:
+    # sigmoid(bias + scale * (projected_home_margin + market_home_spread))
+    logit = logit_bias + logit_scale * (projected_home_margin + market_home_spread)
+    logit = max(-60.0, min(60.0, logit))
+    probability = 1.0 / (1.0 + math.exp(-logit))
+    return clamp_probability(probability)
+
+
+def build_spread_ev_context(primary_edge_info, learned_edge_info, market_home_spread, assumed_spread_price=-110):
+    if market_home_spread is None:
+        return {
+            "home_cover_probability": None,
+            "away_cover_probability": None,
+            "home_fair_cover_odds": None,
+            "away_fair_cover_odds": None,
+            "assumed_spread_price_home": assumed_spread_price,
+            "assumed_spread_price_away": assumed_spread_price,
+            "home_spread_ev_per_unit": None,
+            "away_spread_ev_per_unit": None,
+            "best_spread_ev_side": "PASS",
+            "best_spread_ev_per_unit": None,
+            "ev_model_source": "unavailable",
+        }
+
+    home_cover_probability = learned_edge_info.get("p_home_cover")
+    ev_model_source = "learned_model"
+
+    if home_cover_probability is None:
+        home_cover_probability = estimate_cover_probability(
+            primary_edge_info.get("projected_home_margin"),
+            market_home_spread
+        )
+        ev_model_source = "projected_margin_fallback"
+
+    if home_cover_probability is None:
+        return {
+            "home_cover_probability": None,
+            "away_cover_probability": None,
+            "home_fair_cover_odds": None,
+            "away_fair_cover_odds": None,
+            "assumed_spread_price_home": assumed_spread_price,
+            "assumed_spread_price_away": assumed_spread_price,
+            "home_spread_ev_per_unit": None,
+            "away_spread_ev_per_unit": None,
+            "best_spread_ev_side": "PASS",
+            "best_spread_ev_per_unit": None,
+            "ev_model_source": "unavailable",
+        }
+
+    home_cover_probability = clamp_probability(home_cover_probability)
+    away_cover_probability = clamp_probability(1.0 - home_cover_probability)
+
+    home_fair_cover_odds = probability_to_american_odds(home_cover_probability)
+    away_fair_cover_odds = probability_to_american_odds(away_cover_probability)
+
+    home_spread_ev_per_unit = expected_value_per_unit(home_cover_probability, assumed_spread_price)
+    away_spread_ev_per_unit = expected_value_per_unit(away_cover_probability, assumed_spread_price)
+
+    best_spread_ev_side = "PASS"
+    best_spread_ev_per_unit = None
+
+    if home_spread_ev_per_unit is not None and away_spread_ev_per_unit is not None:
+        if home_spread_ev_per_unit > 0 or away_spread_ev_per_unit > 0:
+            if home_spread_ev_per_unit >= away_spread_ev_per_unit:
+                best_spread_ev_side = "HOME_SPREAD"
+                best_spread_ev_per_unit = home_spread_ev_per_unit
+            else:
+                best_spread_ev_side = "AWAY_SPREAD"
+                best_spread_ev_per_unit = away_spread_ev_per_unit
+        else:
+            best_spread_ev_side = "PASS"
+            best_spread_ev_per_unit = max(home_spread_ev_per_unit, away_spread_ev_per_unit)
+
+    return {
+        "home_cover_probability": round(home_cover_probability, 4) if home_cover_probability is not None else None,
+        "away_cover_probability": round(away_cover_probability, 4) if away_cover_probability is not None else None,
+        "home_fair_cover_odds": home_fair_cover_odds,
+        "away_fair_cover_odds": away_fair_cover_odds,
+        "assumed_spread_price_home": assumed_spread_price,
+        "assumed_spread_price_away": assumed_spread_price,
+        "home_spread_ev_per_unit": home_spread_ev_per_unit,
+        "away_spread_ev_per_unit": away_spread_ev_per_unit,
+        "best_spread_ev_side": best_spread_ev_side,
+        "best_spread_ev_per_unit": best_spread_ev_per_unit,
+        "ev_model_source": ev_model_source,
+    }
+
+
+def calc_site_point_diff(team_summary, is_home):
+    if is_home:
+        pf = nz(team_summary.get("home_avg_pts_for"))
+        pa = nz(team_summary.get("home_avg_pts_against"))
+    else:
+        pf = nz(team_summary.get("away_avg_pts_for"))
+        pa = nz(team_summary.get("away_avg_pts_against"))
+
+    return pf - pa
+
+
+def _get_strength_inputs(home_summary, away_summary):
+    home_season_pd = nz(home_summary.get("avg_point_diff"))
+    away_season_pd = nz(away_summary.get("avg_point_diff"))
+
+    home_site_pd = calc_site_point_diff(home_summary, is_home=True)
+    away_site_pd = calc_site_point_diff(away_summary, is_home=False)
+
+    home_recent_pd = nz(home_summary.get("last_5_avg_point_diff"))
+    away_recent_pd = nz(away_summary.get("last_5_avg_point_diff"))
+
+    return {
+        "home_season_pd": home_season_pd,
+        "away_season_pd": away_season_pd,
+        "home_site_pd": home_site_pd,
+        "away_site_pd": away_site_pd,
+        "home_recent_pd": home_recent_pd,
+        "away_recent_pd": away_recent_pd
+    }
+
+
+def calculate_estimated_edge(home_summary, away_summary, market_home_spread):
+    if market_home_spread is None:
+        return {
+            "projected_home_margin": None,
+            "fair_home_spread": None,
+            "estimated_edge_points": None,
+            "edge_side": "PASS"
+        }
+
+    vals = _get_strength_inputs(home_summary, away_summary)
+
+    home_strength = (
+        0.50 * vals["home_season_pd"] +
+        0.30 * vals["home_site_pd"] +
+        0.20 * vals["home_recent_pd"]
+    )
+
+    away_strength = (
+        0.50 * vals["away_season_pd"] +
+        0.30 * vals["away_site_pd"] +
+        0.20 * vals["away_recent_pd"]
+    )
+
+    home_court_advantage = 1.5
+
+    projected_home_margin = round((home_strength - away_strength) + home_court_advantage, 3)
+    fair_home_spread = round(-projected_home_margin, 3)
+
+    spread_diff = round(fair_home_spread - market_home_spread, 3)
+    estimated_edge_points = round(abs(spread_diff), 3)
+
+    if -1.5 <= spread_diff <= 1.5:
+        edge_side = "PASS"
+    elif spread_diff < -1.5:
+        edge_side = "HOME_SPREAD"
+    elif spread_diff > 1.5:
+        edge_side = "AWAY_SPREAD"
+    else:
+        edge_side = "PASS"
+
+    return {
+        "projected_home_margin": projected_home_margin,
+        "fair_home_spread": fair_home_spread,
+        "estimated_edge_points": estimated_edge_points,
+        "edge_side": edge_side
+    }
+
+
+def calculate_estimated_edge_v2(home_summary, away_summary, market_home_spread):
+    if market_home_spread is None:
+        return {
+            "projected_home_margin": None,
+            "fair_home_spread": None,
+            "spread_diff": None,
+            "adjusted_spread_diff": None,
+            "estimated_edge_points": None,
+            "edge_side": "PASS"
+        }
+
+    vals = _get_strength_inputs(home_summary, away_summary)
+
+    home_strength = (
+        0.60 * vals["home_season_pd"] +
+        0.25 * vals["home_site_pd"] +
+        0.15 * vals["home_recent_pd"]
+    )
+
+    away_strength = (
+        0.60 * vals["away_season_pd"] +
+        0.25 * vals["away_site_pd"] +
+        0.15 * vals["away_recent_pd"]
+    )
+
+    home_court_advantage = 1.5
+
+    raw_projected_home_margin = (home_strength - away_strength) + home_court_advantage
+    projected_home_margin = round(raw_projected_home_margin * 1.10, 3)
+    fair_home_spread = round(-projected_home_margin, 3)
+
+    spread_diff = round(fair_home_spread - market_home_spread, 3)
+
+    adjusted_spread_diff = spread_diff
+    if abs(market_home_spread) >= 10:
+        adjusted_spread_diff *= 0.90
+    elif abs(market_home_spread) >= 7:
+        adjusted_spread_diff *= 0.95
+
+    adjusted_spread_diff = round(adjusted_spread_diff, 3)
+    estimated_edge_points = round(abs(adjusted_spread_diff), 3)
+
+    threshold = 1.5
+    if abs(market_home_spread) >= 10:
+        threshold = 2.5
+
+    if abs(adjusted_spread_diff) <= threshold:
+        edge_side = "PASS"
+    elif adjusted_spread_diff < 0:
+        edge_side = "HOME_SPREAD"
+    else:
+        edge_side = "AWAY_SPREAD"
+
+    return {
+        "projected_home_margin": projected_home_margin,
+        "fair_home_spread": fair_home_spread,
+        "spread_diff": spread_diff,
+        "adjusted_spread_diff": adjusted_spread_diff,
+        "estimated_edge_points": estimated_edge_points,
+        "edge_side": edge_side
+    }
+
+
+def calculate_estimated_edge_v3(home_summary, away_summary, market_home_spread):
+    if market_home_spread is None:
+        return {
+            "projected_home_margin": None,
+            "fair_home_spread": None,
+            "spread_diff": None,
+            "estimated_edge_points": None,
+            "edge_side": "PASS"
+        }
+
+    vals = _get_strength_inputs(home_summary, away_summary)
+
+    home_strength = (
+        0.60 * vals["home_season_pd"] +
+        0.25 * vals["home_site_pd"] +
+        0.15 * vals["home_recent_pd"]
+    )
+
+    away_strength = (
+        0.60 * vals["away_season_pd"] +
+        0.25 * vals["away_site_pd"] +
+        0.15 * vals["away_recent_pd"]
+    )
+
+    home_court_advantage = 1.5
+
+    raw_projected_home_margin = (home_strength - away_strength) + home_court_advantage
+
+    # calibration placeholder — tune from backtest
+    calibrated_home_margin = round(raw_projected_home_margin * 1.10, 3)
+
+    fair_home_spread = round(-calibrated_home_margin, 3)
+    spread_diff = round(fair_home_spread - market_home_spread, 3)
+    estimated_edge_points = round(abs(spread_diff), 3)
+
+    if abs(spread_diff) <= 1.5:
+        edge_side = "PASS"
+    elif spread_diff < 0:
+        edge_side = "HOME_SPREAD"
+    else:
+        edge_side = "AWAY_SPREAD"
+
+    return {
+        "projected_home_margin": calibrated_home_margin,
+        "fair_home_spread": fair_home_spread,
+        "spread_diff": spread_diff,
+        "estimated_edge_points": estimated_edge_points,
+        "edge_side": edge_side
+    }
+
+
+def calculate_estimated_edge_learned(home_summary, away_summary, market_home_spread):
+    """
+    Edge calculation using trained weights from train_stat_builder_weights.
+
+    Uses optimized blend weights, home court advantage, and margin multiplier
+    learned via L-BFGS-B minimization of log-loss on historical ATS data.
+    Includes a logistic head that maps projected margin + spread to P(home covers),
+    plus a learned tau threshold for PASS decisions.
+
+    Falls back to v2 (hardcoded) if no trained weights artifact is found.
+    """
+    trained = _load_trained_weights()
+
+    if trained is None or market_home_spread is None:
+        # Fallback: use v2 if no trained weights
+        if market_home_spread is None:
+            return {
+                "projected_home_margin": None,
+                "fair_home_spread": None,
+                "spread_diff": None,
+                "p_home_cover": None,
+                "estimated_edge_points": None,
+                "edge_side": "PASS",
+                "model_version": "fallback_v2",
+            }
+        return {
+            **calculate_estimated_edge_v2(home_summary, away_summary, market_home_spread),
+            "p_home_cover": None,
+            "model_version": "fallback_v2",
+        }
+
+    sb = trained.get("stat_builder", {})
+    logit_head = trained.get("logit_head", {})
+    mapping = trained.get("mapping", {})
+
+    w_season = sb.get("w_season", 0.60)
+    w_site = sb.get("w_site", 0.25)
+    w_recent = sb.get("w_recent", 0.15)
+    hca = sb.get("home_court_advantage", 1.5)
+    margin_mult = sb.get("margin_mult", 1.10)
+    logit_scale = logit_head.get("scale", 0.11)
+    logit_bias = logit_head.get("bias", 0.0)
+    tau = mapping.get("tau", 0.05)
+    k_edge_points = mapping.get("k_edge_points", 20.0)
+
+    vals = _get_strength_inputs(home_summary, away_summary)
+
+    home_strength = (
+        w_season * vals["home_season_pd"] +
+        w_site * vals["home_site_pd"] +
+        w_recent * vals["home_recent_pd"]
+    )
+
+    away_strength = (
+        w_season * vals["away_season_pd"] +
+        w_site * vals["away_site_pd"] +
+        w_recent * vals["away_recent_pd"]
+    )
+
+    inner_diff = home_strength - away_strength
+    projected_home_margin = round(margin_mult * (inner_diff + hca), 3)
+    fair_home_spread = round(-projected_home_margin, 3)
+    spread_diff = round(fair_home_spread - market_home_spread, 3)
+
+    # Logistic head: p(home covers) = sigmoid(bias + scale * (margin + spread))
+    logit = logit_bias + logit_scale * (projected_home_margin + market_home_spread)
+    logit = max(-60.0, min(60.0, logit))
+    p_home_cover = 1.0 / (1.0 + math.exp(-logit))
+
+    # Edge points from probability
+    edge_prob = abs(p_home_cover - 0.5)
+    estimated_edge_points = round(edge_prob * k_edge_points, 3)
+
+    # Decision using learned tau
+    if p_home_cover >= (0.5 + tau):
+        edge_side = "HOME_SPREAD"
+    elif p_home_cover <= (0.5 - tau):
+        edge_side = "AWAY_SPREAD"
+    else:
+        edge_side = "PASS"
+
+    return {
+        "projected_home_margin": projected_home_margin,
+        "fair_home_spread": fair_home_spread,
+        "spread_diff": spread_diff,
+        "p_home_cover": round(p_home_cover, 4),
+        "estimated_edge_points": estimated_edge_points,
+        "edge_side": edge_side,
+        "model_version": trained.get("model_version", "trained"),
+    }
+
+
+def summarize_team(team_id, stats):
+    recent_n = 5
+    recent_n_3 = 3
+    recent_n_10 = 10
+
+    recent_results_5 = stats["recent_results"][-recent_n:]
+    recent_results_10 = stats["recent_results"][-recent_n_10:]
+
+    recent_point_diff_3 = stats["recent_point_diff"][-recent_n_3:]
+    recent_point_diff_5 = stats["recent_point_diff"][-recent_n:]
+    recent_point_diff_10 = stats["recent_point_diff"][-recent_n_10:]
+
+    recent_pts_for_5 = stats["recent_pts_for"][-recent_n:]
+    recent_pts_against_5 = stats["recent_pts_against"][-recent_n:]
+
+    recent_ats_5 = stats["recent_ats"][-recent_n:]
+    recent_ats_10 = stats["recent_ats"][-recent_n_10:]
+
+    return {
+        "team_id": team_id,
+        "games": stats["games"],
+        "wins": stats["wins"],
+        "losses": stats["losses"],
+        "win_pct": pct(stats["wins"], stats["games"]),
+        "avg_pts_for": round(stats["pts_for"] / stats["games"], 3) if stats["games"] else None,
+        "avg_pts_against": round(stats["pts_against"] / stats["games"], 3) if stats["games"] else None,
+        "avg_point_diff": round(stats["point_diff_total"] / stats["games"], 3) if stats["games"] else None,
+
+        "home_games": stats["home_games"],
+        "home_win_pct": pct(stats["home_wins"], stats["home_games"]),
+        "home_avg_pts_for": round(stats["home_pts_for"] / stats["home_games"], 3) if stats["home_games"] else None,
+        "home_avg_pts_against": round(stats["home_pts_against"] / stats["home_games"], 3) if stats["home_games"] else None,
+
+        "away_games": stats["away_games"],
+        "away_win_pct": pct(stats["away_wins"], stats["away_games"]),
+        "away_avg_pts_for": round(stats["away_pts_for"] / stats["away_games"], 3) if stats["away_games"] else None,
+        "away_avg_pts_against": round(stats["away_pts_against"] / stats["away_games"], 3) if stats["away_games"] else None,
+
+        "ats_games": stats["ats_games"],
+        "ats_win_pct": pct(stats["ats_wins"], stats["ats_games"]),
+
+        "last_5_win_pct": pct(sum(recent_results_5), len(recent_results_5)),
+        "last_5_avg_point_diff": avg(recent_point_diff_5),
+        "last_5_avg_pts_for": avg(recent_pts_for_5),
+        "last_5_avg_pts_against": avg(recent_pts_against_5),
+        "last_5_ats_win_pct": pct(sum(recent_ats_5), len(recent_ats_5)),
+
+        "point_diff_MA_3": avg(recent_point_diff_3),
+        "point_diff_MA_5": avg(recent_point_diff_5),
+        "point_diff_MA_10": avg(recent_point_diff_10),
+
+        "ATS_cover_rate_MA_5": pct(sum(recent_ats_5), len(recent_ats_5)),
+        "ATS_cover_rate_MA_10": pct(sum(recent_ats_10), len(recent_ats_10)),
+
+        "last_10_win_pct": pct(sum(recent_results_10), len(recent_results_10)),
+        "last_10_avg_point_diff": avg(recent_point_diff_10),
+        "last_10_ats_win_pct": pct(sum(recent_ats_10), len(recent_ats_10)),
+    }
+
+
+def build_team_stats(historical_games):
+    team_stats = defaultdict(init_team_stats)
+
+    for g in historical_games:
+        home = g["home_team_id"]
+        away = g["away_team_id"]
+        hs = g["home_score"]
+        aws = g["away_score"]
+        spread = g["opening_spread"]
+
+        home_win = hs > aws
+        away_win = aws > hs
+
+        home_cover = calc_home_cover(spread, hs, aws)
+        away_cover = None if home_cover is None else (not home_cover)
+
+        home_stats = team_stats[home]
+        home_stats["games"] += 1
+        home_stats["wins"] += 1 if home_win else 0
+        home_stats["losses"] += 0 if home_win else 1
+        home_stats["pts_for"] += hs
+        home_stats["pts_against"] += aws
+        home_stats["point_diff_total"] += (hs - aws)
+        home_stats["home_games"] += 1
+        home_stats["home_wins"] += 1 if home_win else 0
+        home_stats["home_pts_for"] += hs
+        home_stats["home_pts_against"] += aws
+        home_stats["recent_results"].append(1 if home_win else 0)
+        home_stats["recent_point_diff"].append(hs - aws)
+        home_stats["recent_pts_for"].append(hs)
+        home_stats["recent_pts_against"].append(aws)
+
+        if home_cover is not None:
+            home_stats["ats_games"] += 1
+            home_stats["ats_wins"] += 1 if home_cover else 0
+            home_stats["recent_ats"].append(1 if home_cover else 0)
+
+        away_stats = team_stats[away]
+        away_stats["games"] += 1
+        away_stats["wins"] += 1 if away_win else 0
+        away_stats["losses"] += 0 if away_win else 1
+        away_stats["pts_for"] += aws
+        away_stats["pts_against"] += hs
+        away_stats["point_diff_total"] += (aws - hs)
+        away_stats["away_games"] += 1
+        away_stats["away_wins"] += 1 if away_win else 0
+        away_stats["away_pts_for"] += aws
+        away_stats["away_pts_against"] += hs
+        away_stats["recent_results"].append(1 if away_win else 0)
+        away_stats["recent_point_diff"].append(aws - hs)
+        away_stats["recent_pts_for"].append(aws)
+        away_stats["recent_pts_against"].append(hs)
+
+        if away_cover is not None:
+            away_stats["ats_games"] += 1
+            away_stats["ats_wins"] += 1 if away_cover else 0
+            away_stats["recent_ats"].append(1 if away_cover else 0)
+
+    return team_stats
+
+
+def build_head_to_head_stats(home_team_id, away_team_id, historical_games):
+    h2h_games = []
+
+    for g in historical_games:
+        g_home = g["home_team_id"]
+        g_away = g["away_team_id"]
+
+        teams_match = (
+            (g_home == home_team_id and g_away == away_team_id) or
+            (g_home == away_team_id and g_away == home_team_id)
+        )
+
+        if teams_match:
+            h2h_games.append(g)
+
+    if not h2h_games:
+        return {
+            "games": 0,
+            "home_team_wins": 0,
+            "away_team_wins": 0,
+            "home_team_win_pct": None,
+            "away_team_win_pct": None,
+            "home_team_avg_margin": None,
+            "away_team_avg_margin": None,
+            "home_team_ats_wins": 0,
+            "away_team_ats_wins": 0,
+            "home_team_ats_win_pct": None,
+            "away_team_ats_win_pct": None,
+            "last_5_matchups": []
+        }
+
+    home_team_wins = 0
+    away_team_wins = 0
+    home_team_ats_wins = 0
+    away_team_ats_wins = 0
+    margins_for_home_team = []
+    last_5_matchups = []
+
+    for g in h2h_games:
+        g_home = g["home_team_id"]
+        g_away = g["away_team_id"]
+        hs = g["home_score"]
+        aws = g["away_score"]
+        spread = g["opening_spread"]
+
+        if g_home == home_team_id and g_away == away_team_id:
+            margin_for_home_team = hs - aws
+            home_team_won = hs > aws
+
+            home_cover = calc_home_cover(spread, hs, aws)
+            away_cover = None if home_cover is None else (not home_cover)
+
+            h2h_home_cover = home_cover
+            h2h_away_cover = away_cover
+
+        else:
+            margin_for_home_team = aws - hs
+            home_team_won = aws > hs
+
+            actual_home_cover = calc_home_cover(spread, hs, aws)
+            actual_away_cover = None if actual_home_cover is None else (not actual_home_cover)
+
+            h2h_home_cover = actual_away_cover
+            h2h_away_cover = actual_home_cover
+
+        margins_for_home_team.append(margin_for_home_team)
+
+        if home_team_won:
+            home_team_wins += 1
+        else:
+            away_team_wins += 1
+
+        if h2h_home_cover is True:
+            home_team_ats_wins += 1
+        if h2h_away_cover is True:
+            away_team_ats_wins += 1
+
+        last_5_matchups.append({
+            "margin_for_home_team": margin_for_home_team,
+            "home_team_won": home_team_won,
+            "home_team_covered": h2h_home_cover,
+            "away_team_covered": h2h_away_cover
+        })
+
+    last_5_matchups = last_5_matchups[-5:]
+
+    games = len(h2h_games)
+
+    return {
+        "games": games,
+        "home_team_wins": home_team_wins,
+        "away_team_wins": away_team_wins,
+        "home_team_win_pct": pct(home_team_wins, games),
+        "away_team_win_pct": pct(away_team_wins, games),
+        "home_team_avg_margin": avg(margins_for_home_team),
+        "away_team_avg_margin": round(-avg(margins_for_home_team), 3) if margins_for_home_team else None,
+        "home_team_ats_wins": home_team_ats_wins,
+        "away_team_ats_wins": away_team_ats_wins,
+        "home_team_ats_win_pct": pct(home_team_ats_wins, games),
+        "away_team_ats_win_pct": pct(away_team_ats_wins, games),
+        "last_5_matchups": last_5_matchups
+    }
+
+
+def build_matchup_payload_from_api_games(
+    api_games,
+    team_stats,
+    source_team_map,
+    historical_games,
+    team_game_rows=None,
+):
+    """
+    Build the matchup payload sent to the AI.
+
+    Parameters
+    ----------
+    api_games : list[dict]
+        Today's games from the NBA API.
+    team_stats : dict
+        Aggregated season stats per team_id (from build_team_stats).
+    source_team_map : dict
+        Mapping from source_team_id -> {team_id, team_name, team_abbrev}.
+    historical_games : list[dict]
+        Score-only game rows (fallback for features).
+    team_game_rows : list[dict] | None
+        Box-score rows from fetch_historical_games_with_box_scores.
+        When provided, enables full L1 feature computation (FG%, 3PT%, etc.).
+    """
+    payload = []
+
+    # Load L1 allow-list and attempt to load the trained L1 model
+    l1_allow = get_l1_allowlist_from_env()
+
+    # Pre-load the L1 model so we only print the load message once
+    from Helpers.l1_live_features import load_l1_model_and_scaler
+    l1_model, l1_scaler, l1_feature_cols = load_l1_model_and_scaler()
+
+    has_box_scores = team_game_rows is not None and len(team_game_rows) > 0
+    if has_box_scores:
+        print(f"  Box-score rows available: {len(team_game_rows)} team-game rows")
+    else:
+        print("  No box-score rows — L1 features will use score-only fallback")
+
+    for g in api_games:
+        home_source_id = g["home_source_team_id"]
+        away_source_id = g["away_source_team_id"]
+
+        home_team = source_team_map.get(home_source_id)
+        away_team = source_team_map.get(away_source_id)
+
+        if not home_team or not away_team:
+            print(f"Skipping game because team mapping was not found: {g['away_team_name']} at {g['home_team_name']}")
+            continue
+
+        home_team_id = home_team["team_id"]
+        away_team_id = away_team["team_id"]
+
+        home_summary = summarize_team(home_team_id, team_stats[home_team_id])
+        away_summary = summarize_team(away_team_id, team_stats[away_team_id])
+
+        # Edge calculations — all versions for comparison
+        edge_info_v1 = calculate_estimated_edge(
+            home_summary,
+            away_summary,
+            g.get("home_current_spread")
+        )
+
+        edge_info_v2 = calculate_estimated_edge_v2(
+            home_summary,
+            away_summary,
+            g.get("home_current_spread")
+        )
+
+        edge_info_v3 = calculate_estimated_edge_v3(
+            home_summary,
+            away_summary,
+            g.get("home_current_spread")
+        )
+
+        # Learned edge (uses trained weights if available, else falls back to v2)
+        edge_info_learned = calculate_estimated_edge_learned(
+            home_summary,
+            away_summary,
+            g.get("home_current_spread")
+        )
+
+        # Use learned edge as primary if trained weights loaded, else v2
+        if edge_info_learned.get("model_version", "").startswith("stat_builder_weights"):
+            active_edge_info = edge_info_learned
+        else:
+            active_edge_info = edge_info_v2
+
+        h2h_stats = build_head_to_head_stats(
+            home_team_id,
+            away_team_id,
+            historical_games
+        )
+
+        home_opening_spread = g.get("home_opening_spread")
+        home_current_spread = g.get("home_current_spread")
+        away_opening_spread = g.get("away_opening_spread")
+        away_current_spread = g.get("away_current_spread")
+        opening_total = g.get("opening_total")
+        current_total = g.get("current_total")
+
+        spread_move_home = safe_diff(home_current_spread, home_opening_spread)
+        spread_move_away = safe_diff(away_current_spread, away_opening_spread)
+        total_move = safe_diff(current_total, opening_total)
+
+        ev_context = build_spread_ev_context(
+            active_edge_info,
+            edge_info_learned,
+            home_current_spread,
+            assumed_spread_price=-110
+        )
+
+        game_entry = {
+            "game_id": int(g["nba_game_id"]) if g["nba_game_id"] else None,
+            "matchup": f"{away_team['team_name']} @ {home_team['team_name']}",
+            "game_status": g["game_status"],
+
+            "home_team_name": home_team["team_name"],
+            "away_team_name": away_team["team_name"],
+
+            "home_opening_spread": g.get("home_opening_spread"),
+            "away_opening_spread": g.get("away_opening_spread"),
+            "home_current_spread": g.get("home_current_spread"),
+            "away_current_spread": g.get("away_current_spread"),
+
+            "opening_spread": g.get("opening_spread"),
+            "current_spread": g.get("current_spread"),
+
+            "opening_total": g.get("opening_total"),
+            "current_total": g.get("current_total"),
+
+            "spread_move_home": spread_move_home,
+            "spread_move_away": spread_move_away,
+            "total_move": total_move,
+
+            "home_cover_probability": ev_context["home_cover_probability"],
+            "away_cover_probability": ev_context["away_cover_probability"],
+            "home_fair_cover_odds": ev_context["home_fair_cover_odds"],
+            "away_fair_cover_odds": ev_context["away_fair_cover_odds"],
+            "assumed_spread_price_home": ev_context["assumed_spread_price_home"],
+            "assumed_spread_price_away": ev_context["assumed_spread_price_away"],
+            "home_spread_ev_per_unit": ev_context["home_spread_ev_per_unit"],
+            "away_spread_ev_per_unit": ev_context["away_spread_ev_per_unit"],
+            "best_spread_ev_side": ev_context["best_spread_ev_side"],
+            "best_spread_ev_per_unit": ev_context["best_spread_ev_per_unit"],
+            "ev_model_source": ev_context["ev_model_source"],
+
+            "home_team_id": home_team_id,
+            "away_team_id": away_team_id,
+
+            "home_stats": home_summary,
+            "away_stats": away_summary,
+            "head_to_head_stats": h2h_stats,
+
+            "rest_advantage": None,
+            "turnover_edge_MA_5": None,
+            "rebound_edge_MA_5": None,
+
+            # Primary edge fields sent to AI
+            "projected_home_margin": active_edge_info["projected_home_margin"],
+            "fair_home_spread": active_edge_info["fair_home_spread"],
+            "estimated_edge_points": active_edge_info["estimated_edge_points"],
+            "edge_side": active_edge_info["edge_side"],
+
+            # Keep all versions for testing / comparison
+            "edge_model_v1": edge_info_v1,
+            "edge_model_v2": edge_info_v2,
+            "edge_model_v3": edge_info_v3,
+            "edge_model_learned": edge_info_learned,
+        }
+
+        # P(home covers) from the learned model
+        if edge_info_learned.get("p_home_cover") is not None:
+            game_entry["p_home_cover"] = edge_info_learned["p_home_cover"]
+            game_entry["edge_model_version"] = edge_info_learned.get("model_version", "unknown")
+
+        # ---- L1 model features (allow-list subset for AI context) ----
+        if l1_allow:
+            l1_features = build_l1_model_features_subset(
+                l1_allow,
+                home_team_id,
+                away_team_id,
+                team_game_rows if has_box_scores else None,
+                historical_games,
+                g,
+            )
+
+            null_feature_count = sum(1 for value in l1_features.values() if value is None)
+
+            game_entry["l1_model_features"] = l1_features
+            game_entry["l1_model_features_meta"] = {
+                "enabled": True,
+                "allowlist_size": len(l1_allow),
+                "computed_feature_count": len(l1_features),
+                "null_feature_count": null_feature_count,
+                "data_source": "box_scores" if has_box_scores else "scores_only",
+            }
+
+            days_rest = l1_features.get("days_rest")
+            opp_days_rest = l1_features.get("opp_days_rest")
+            game_entry["rest_advantage"] = safe_diff(days_rest, opp_days_rest)
+
+            team_turnovers = first_not_none(
+                l1_features.get("turnovers_MA_5"),
+                l1_features.get("turnovers_MA_10"),
+                l1_features.get("turnovers_MA_3"),
+            )
+
+            opp_turnovers = first_not_none(
+                l1_features.get("opp_turnovers_MA_5"),
+                l1_features.get("opp_turnovers_MA_10"),
+                l1_features.get("opp_turnovers_MA_3"),
+            )
+
+            game_entry["turnover_edge_MA_5"] = safe_diff(opp_turnovers, team_turnovers)
+
+            team_total_rebounds = total_rebounds_from_features("", l1_features)
+            opp_total_rebounds = total_rebounds_from_features("opp_", l1_features)
+
+            game_entry["rebound_edge_MA_5"] = safe_diff(
+                team_total_rebounds,
+                opp_total_rebounds
+            )
+        else:
+            game_entry["l1_model_features_meta"] = {
+                "enabled": False,
+                "allowlist_size": 0,
+                "computed_feature_count": 0,
+                "null_feature_count": 0,
+                "data_source": "none",
+            }
+
+        # ---- L1 model scoring (actual probability from trained model) ----
+        if l1_model is not None:
+            full_row = build_full_feature_row(
+                home_team_id,
+                away_team_id,
+                team_game_rows if has_box_scores else None,
+                historical_games,
+                g,
+            )
+            l1_score = score_with_l1_model(full_row)
+            if l1_score is not None:
+                game_entry["l1_model_score"] = l1_score
+            else:
+                game_entry["l1_model_score"] = {"l1_model_available": False}
+        else:
+            game_entry["l1_model_score"] = {"l1_model_available": False}
+
+        payload.append(game_entry)
+
+    return payload

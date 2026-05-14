@@ -13,15 +13,6 @@ The system is designed to:
 
 This project is intended as a decision-support and research tool. It does not guarantee profitable bets.
 
-## What This Branch Includes
-
-The `feature/output-experiments` branch includes:
-
-* the main NBA prediction pipeline
-* helper modules for database queries, stat building, and AI analysis
-* a simple desktop UI (`app.py`) for running the pipeline and viewing results
-* project documentation and supporting code for the model/data workflow
-
 ## Repository Structure
 
 AI/                    Main prediction pipeline and helper logic

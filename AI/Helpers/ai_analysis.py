@@ -68,13 +68,30 @@ Decision hierarchy (use all available signals, weighted by reliability):
    These should not override a strong primary signal by themselves,
    but they should meaningfully raise or lower confidence as supporting context.
 
-5. SUPPORTING — l1_model_score (if present and l1_score_usable is true):
+5. SUPPORTING — market movement fields:
+   Pay attention to these if present:
+   - spread_move_home
+   - spread_move_away
+   - total_move
+
+   Interpretation:
+   - spread_move_home shows how much the home spread moved from opening to current
+   - spread_move_away shows how much the away spread moved from opening to current
+   - total_move shows how much the game total moved from opening to current
+
+   Use line movement only as supporting market context.
+   Meaningful spread movement can modestly raise confidence when it supports
+   the main edge signal.
+   Do not let line movement override clearly stronger model or trend signals by itself.
+   total_move is secondary context and should not drive spread picks on its own.
+
+6. SUPPORTING — l1_model_score (if present and l1_score_usable is true):
    l1_win_probability is a trained logistic regression probability of home team winning.
    This predicts the game winner, not spread coverage, so use directionally.
    l1_confidence (0-100) indicates how far the probability is from 50/50.
    If l1_confidence >= 15, treat this as a meaningful lean.
 
-6. CONTEXT — l1_model_features:
+7. CONTEXT — l1_model_features:
    Numeric pregame rolling averages from the L1 allow-list.
    Use as a stat snapshot to validate or boost confidence.
    If a feature value is null, ignore it. Do not fabricate missing values.
@@ -87,8 +104,10 @@ Signal combination rules:
   treat that as meaningful confirmation.
 - When rest_advantage, turnover_edge_MA_5, or rebound_edge_MA_5 support the same side
   as the main edge signal, confidence may be increased modestly.
-- When they conflict with the main edge signal, reduce confidence slightly but do not
-  automatically flip the pick.
+- When meaningful spread movement supports the same side as the main edge signal,
+  confidence may be increased modestly.
+- When supporting context conflicts with the main edge signal, reduce confidence
+  slightly but do not automatically flip the pick.
 - Do not restate or recalculate spread fields or model outputs.
 
 PASS rules (use sparingly — PASS should be the exception, not the norm):
@@ -115,14 +134,17 @@ Confidence calibration:
 Reason writing rules:
 - Keep short_reason concise and specific.
 - Mention the strongest 1-2 reasons only.
-- If using the new payload fields, reference them naturally, for example:
+- If using the newer payload fields, reference them naturally, for example:
   - stronger recent point differential trend
   - better recent ATS trend
   - small rest advantage
   - turnover edge supports home side
   - rebound edge supports away side
+  - line movement supports home side
+  - line movement modestly supports away side
 - Do not mention fields that are null.
 - Do not fabricate missing information.
+- If spread_move_home, spread_move_away, and total_move are all 0.0, treat them as neutral.
 
 Always ensure each game has a decision, do not omit or skip any games.
 

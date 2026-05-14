@@ -751,6 +751,17 @@ def build_matchup_payload_from_api_games(
             historical_games
         )
 
+        home_opening_spread = g.get("home_opening_spread")
+        home_current_spread = g.get("home_current_spread")
+        away_opening_spread = g.get("away_opening_spread")
+        away_current_spread = g.get("away_current_spread")
+        opening_total = g.get("opening_total")
+        current_total = g.get("current_total")
+
+        spread_move_home = safe_diff(home_current_spread, home_opening_spread)
+        spread_move_away = safe_diff(away_current_spread, away_opening_spread)
+        total_move = safe_diff(current_total, opening_total)
+
         game_entry = {
             "game_id": int(g["nba_game_id"]) if g["nba_game_id"] else None,
             "matchup": f"{away_team['team_name']} @ {home_team['team_name']}",
@@ -766,6 +777,13 @@ def build_matchup_payload_from_api_games(
 
             "opening_spread": g.get("opening_spread"),
             "current_spread": g.get("current_spread"),
+
+            "opening_total": g.get("opening_total"),
+            "current_total": g.get("current_total"),
+
+            "spread_move_home": spread_move_home,
+            "spread_move_away": spread_move_away,
+            "total_move": total_move,
 
             "home_team_id": home_team_id,
             "away_team_id": away_team_id,

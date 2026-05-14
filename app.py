@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tkinter as tk
 from tkinter import scrolledtext, ttk
@@ -135,14 +136,19 @@ def copy_results():
     status_var.set("Results copied to clipboard")
 
 
+def get_results_dir():
+    repo_root = Path(__file__).parent
+    results_dir = repo_root / "results"
+    results_dir.mkdir(exist_ok=True)
+    return results_dir
+
+
 def save_results():
     if not last_predictions:
         status_var.set("No results to save")
         return
 
-    repo_root = Path(__file__).parent
-    results_dir = repo_root / "results"
-    results_dir.mkdir(exist_ok=True)
+    results_dir = get_results_dir()
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     mode_text = last_run_mode if last_run_mode else "run"
@@ -167,9 +173,7 @@ def save_raw_output():
         status_var.set("No raw output to save")
         return
 
-    repo_root = Path(__file__).parent
-    results_dir = repo_root / "results"
-    results_dir.mkdir(exist_ok=True)
+    results_dir = get_results_dir()
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
     mode_text = last_run_mode if last_run_mode else "run"
@@ -187,6 +191,19 @@ def save_raw_output():
 
     save_path.write_text("\n".join(text_to_save), encoding="utf-8")
     status_var.set(f"Raw output saved to {save_path.name}")
+
+
+def open_results_folder():
+    results_dir = get_results_dir()
+
+    try:
+        os.startfile(results_dir)
+        status_var.set("Opened results folder")
+    except AttributeError:
+        subprocess.Popen(["explorer", str(results_dir)])
+        status_var.set("Opened results folder")
+    except Exception as e:
+        status_var.set(f"Could not open results folder: {e}")
 
 
 def on_results_mousewheel(event):
@@ -701,6 +718,16 @@ save_raw_button = tk.Button(
     state=tk.DISABLED
 )
 save_raw_button.pack(side=tk.LEFT, padx=6)
+
+open_results_button = tk.Button(
+    button_row,
+    text="Open Results Folder",
+    font=("Arial", 11),
+    padx=12,
+    pady=6,
+    command=open_results_folder
+)
+open_results_button.pack(side=tk.LEFT, padx=6)
 
 status_var = tk.StringVar(value="Ready to run")
 status_label = tk.Label(

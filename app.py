@@ -91,6 +91,70 @@ def parse_spread_pick_block(block: str):
     return data
 
 
+def format_predictions_for_clipboard(predictions):
+    lines = []
+
+    for index, prediction in enumerate(predictions, start=1):
+        risk_text = prediction["risk_flags"] if prediction["risk_flags"] else "None"
+        lines.append(f"{index}. {prediction['matchup']}")
+        lines.append(f"Bet: {prediction['bet']}")
+        lines.append(f"Confidence: {prediction['confidence']}")
+        lines.append(f"Estimated Edge: {prediction['edge']}")
+        lines.append(f"Reason: {prediction['reason']}")
+        lines.append(f"Risk Flags: {risk_text}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def copy_results():
+    if not last_predictions:
+        status_var.set("No results to copy")
+        return
+
+    text_to_copy = format_predictions_for_clipboard(last_predictions)
+    root.clipboard_clear()
+    root.clipboard_append(text_to_copy)
+    root.update()
+    status_var.set("Results copied to clipboard")
+
+
+def on_results_mousewheel(event):
+    if not results_canvas.winfo_exists():
+        return
+
+    bbox = results_canvas.bbox("all")
+    if not bbox:
+        return
+
+    visible_height = results_canvas.winfo_height()
+    content_height = bbox[3] - bbox[1]
+
+    if content_height <= visible_height:
+        return
+
+    if event.num == 4:
+        results_canvas.yview_scroll(-1, "units")
+    elif event.num == 5:
+        results_canvas.yview_scroll(1, "units")
+    elif event.delta:
+        results_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+
+def bind_mousewheel_recursive(widget):
+    widget.bind("<MouseWheel>", on_results_mousewheel)
+    widget.bind("<Button-4>", on_results_mousewheel)
+    widget.bind("<Button-5>", on_results_mousewheel)
+
+    for child in widget.winfo_children():
+        bind_mousewheel_recursive(child)
+
+
+def refresh_scroll_region():
+    results_canvas.update_idletasks()
+    results_canvas.configure(scrollregion=results_canvas.bbox("all"))
+
+
 def show_placeholder(message):
     placeholder = tk.Label(
         cards_container,
@@ -100,12 +164,15 @@ def show_placeholder(message):
         bg="#f3f3f3",
     )
     placeholder.pack(pady=20)
+    bind_mousewheel_recursive(placeholder)
+    refresh_scroll_region()
     return placeholder
 
 
 def clear_cards_container():
     for widget in cards_container.winfo_children():
         widget.destroy()
+    refresh_scroll_region()
 
 
 def set_stage_status(text):
@@ -124,8 +191,9 @@ def animate_status():
 
 
 def clear_predictions():
-    global is_running
+    global is_running, last_predictions
     is_running = False
+    last_predictions = []
 
     status_var.set("Ready to run")
     progress_var.set(0)
@@ -139,7 +207,7 @@ def clear_predictions():
 
     progress_bar.pack_forget()
 
-    show_placeholder('Click "Run Predictions" to generate today\'s recommendations.')
+    show_placeholder('Click "Run Predictions" or "Run Demo" to generate recommendations.')
 
 
 def toggle_raw_output():
@@ -152,8 +220,20 @@ def toggle_raw_output():
 
 
 def make_card(parent, prediction):
-    card = tk.Frame(parent, bd=1, relief=tk.SOLID, padx=12, pady=10, bg="white")
-    card.pack(fill=tk.X, padx=12, pady=8)
+    is_pass = prediction["bet"].upper() == "PASS"
+
+    if is_pass:
+        border_color = "#b08d2f"
+        bet_color = "#9a7d0a"
+    else:
+        border_color = "#2e8b57"
+        bet_color = "#1f7a1f"
+
+    outer = tk.Frame(parent, bg=border_color, padx=2, pady=2)
+    outer.pack(fill=tk.X, padx=12, pady=8)
+
+    card = tk.Frame(outer, bg="white", padx=12, pady=10)
+    card.pack(fill=tk.X)
 
     matchup_label = tk.Label(
         card,
@@ -165,7 +245,6 @@ def make_card(parent, prediction):
     matchup_label.pack(fill=tk.X)
 
     bet_text = f'Bet: {prediction["bet"]}'
-    bet_color = "#1f7a1f" if prediction["bet"].upper() != "PASS" else "#9a7d0a"
 
     bet_label = tk.Label(
         card,
@@ -211,11 +290,17 @@ def make_card(parent, prediction):
     )
     risk_label.pack(fill=tk.X, pady=(4, 0))
 
+    bind_mousewheel_recursive(outer)
+    refresh_scroll_region()
+
 
 def update_progress_from_line(line: str):
     text = line.strip()
 
-    if "=== Fetching data ===" in text:
+    if "=== DEMO MODE ENABLED ===" in text:
+        set_stage_status("Loading demo games")
+        progress_var.set(20)
+    elif "=== Fetching data ===" in text:
         set_stage_status("Fetching data")
         progress_var.set(15)
     elif "=== Head-to-Head Stats ===" in text:
@@ -244,11 +329,14 @@ def update_progress_from_line(line: str):
         progress_var.set(100)
 
 
-def run_predictions():
-    global is_running, dot_index
+def start_run(mode_label, worker_target):
+    global is_running, dot_index, last_predictions
+    last_predictions = []
 
     run_button.config(state=tk.DISABLED)
+    demo_button.config(state=tk.DISABLED)
     clear_button.config(state=tk.DISABLED)
+    copy_button.config(state=tk.DISABLED)
 
     clear_cards_container()
 
@@ -259,15 +347,23 @@ def run_predictions():
 
     is_running = True
     dot_index = 0
-    set_stage_status("Starting pipeline")
+    set_stage_status(mode_label)
     progress_var.set(10)
 
     progress_bar.pack(pady=(0, 10), after=status_label)
     animate_status()
 
-    worker = threading.Thread(target=run_predictions_worker, daemon=True)
+    worker = threading.Thread(target=worker_target, daemon=True)
     worker.start()
     root.after(100, poll_output_queue)
+
+
+def run_predictions():
+    start_run("Starting pipeline", run_predictions_worker)
+
+
+def run_demo_predictions():
+    start_run("Starting demo pipeline", run_demo_worker)
 
 
 def run_predictions_worker():
@@ -275,6 +371,30 @@ def run_predictions_worker():
 
     process = subprocess.Popen(
         ["py", "-u", "AI\\main.py"],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    collected_output = []
+
+    if process.stdout is not None:
+        for line in process.stdout:
+            collected_output.append(line)
+            output_queue.put(("line", line))
+
+    return_code = process.wait()
+    full_output = "".join(collected_output)
+    output_queue.put(("done", (return_code, full_output)))
+
+
+def run_demo_worker():
+    repo_root = Path(__file__).parent
+
+    process = subprocess.Popen(
+        ["py", "-u", "AI\\main.py", "--demo"],
         cwd=repo_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -313,15 +433,17 @@ def poll_output_queue():
 
 
 def finish_run(return_code, full_output):
-    global is_running
+    global is_running, last_predictions
     is_running = False
 
     run_button.config(state=tk.NORMAL)
+    demo_button.config(state=tk.NORMAL)
     clear_button.config(state=tk.NORMAL)
 
     toggle_raw_button.pack(pady=(0, 8))
 
     if return_code != 0:
+        copy_button.config(state=tk.DISABLED)
         status_var.set("Run failed")
         progress_var.set(0)
 
@@ -346,11 +468,14 @@ def finish_run(return_code, full_output):
             bg="white",
             anchor="w",
         ).pack(fill=tk.X, pady=(4, 0))
+
+        refresh_scroll_region()
         return
 
     mode, blocks = extract_prediction_blocks(full_output)
 
     if not blocks:
+        copy_button.config(state=tk.DISABLED)
         status_var.set("Run completed, but no predictions were found")
         clear_cards_container()
         show_placeholder("No readable predictions found.")
@@ -360,6 +485,8 @@ def finish_run(return_code, full_output):
         parsed_predictions = [parse_human_prediction_line(line) for line in blocks]
     else:
         parsed_predictions = [parse_spread_pick_block(block) for block in blocks]
+
+    last_predictions = parsed_predictions
 
     clear_cards_container()
 
@@ -371,12 +498,15 @@ def finish_run(return_code, full_output):
         anchor="w",
     )
     results_header.pack(fill=tk.X, padx=12, pady=(4, 4))
+    bind_mousewheel_recursive(results_header)
 
     for prediction in parsed_predictions:
         make_card(cards_container, prediction)
 
+    copy_button.config(state=tk.NORMAL)
     status_var.set(f"Run completed: {len(parsed_predictions)} prediction(s)")
     progress_var.set(100)
+    refresh_scroll_region()
 
 
 root = tk.Tk()
@@ -390,6 +520,7 @@ is_running = False
 current_status_base = "Ready to run"
 dot_index = 0
 dot_states = [".", "..", "..."]
+last_predictions = []
 
 title_label = tk.Label(
     root,
@@ -421,6 +552,16 @@ run_button = tk.Button(
 )
 run_button.pack(side=tk.LEFT, padx=6)
 
+demo_button = tk.Button(
+    button_row,
+    text="Run Demo",
+    font=("Arial", 11),
+    padx=12,
+    pady=6,
+    command=run_demo_predictions
+)
+demo_button.pack(side=tk.LEFT, padx=6)
+
 clear_button = tk.Button(
     button_row,
     text="Clear",
@@ -430,6 +571,17 @@ clear_button = tk.Button(
     command=clear_predictions
 )
 clear_button.pack(side=tk.LEFT, padx=6)
+
+copy_button = tk.Button(
+    button_row,
+    text="Copy Results",
+    font=("Arial", 11),
+    padx=12,
+    pady=6,
+    command=copy_results,
+    state=tk.DISABLED
+)
+copy_button.pack(side=tk.LEFT, padx=6)
 
 status_var = tk.StringVar(value="Ready to run")
 status_label = tk.Label(
@@ -452,8 +604,31 @@ progress_bar = ttk.Progressbar(
 )
 progress_bar.pack_forget()
 
-cards_frame_outer = tk.Frame(root, bg="#f3f3f3")
-cards_frame_outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+results_outer = tk.Frame(root, bg="#f3f3f3")
+results_outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
+
+results_canvas = tk.Canvas(results_outer, bg="#f3f3f3", highlightthickness=0)
+results_scrollbar = ttk.Scrollbar(results_outer, orient="vertical", command=results_canvas.yview)
+results_canvas.configure(yscrollcommand=results_scrollbar.set)
+
+results_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+results_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+cards_frame_outer = tk.Frame(results_canvas, bg="#f3f3f3")
+canvas_window = results_canvas.create_window((0, 0), window=cards_frame_outer, anchor="nw")
+
+
+def on_cards_frame_configure(_event):
+    refresh_scroll_region()
+
+
+def on_canvas_configure(event):
+    results_canvas.itemconfigure(canvas_window, width=event.width)
+
+
+cards_frame_outer.bind("<Configure>", on_cards_frame_configure)
+results_canvas.bind("<Configure>", on_canvas_configure)
+bind_mousewheel_recursive(results_canvas)
 
 cards_container = tk.Frame(cards_frame_outer, bg="#f3f3f3")
 cards_container.pack(fill=tk.BOTH, expand=True)
@@ -472,6 +647,6 @@ raw_output_box = scrolledtext.ScrolledText(
     height=12
 )
 
-show_placeholder('Click "Run Predictions" to generate today\'s recommendations.')
+show_placeholder('Click "Run Predictions" or "Run Demo" to generate recommendations.')
 
 root.mainloop()

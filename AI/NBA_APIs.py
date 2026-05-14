@@ -1,3 +1,4 @@
+import os
 import requests
 from datetime import datetime
 import json
@@ -31,6 +32,28 @@ def safe_get_json(url):
     except ValueError:
         print(f"Error: {url} did not return valid JSON.")
         return None
+
+
+def load_demo_games():
+    demo_path = os.path.join(os.path.dirname(__file__), "demo_games.json")
+
+    try:
+        with open(demo_path, "r", encoding="utf-8") as f:
+            demo_games = json.load(f)
+
+        if not isinstance(demo_games, list):
+            print("Demo games file is not a list.")
+            return []
+
+        return demo_games
+
+    except FileNotFoundError:
+        print(f"Demo games file not found: {demo_path}")
+        return []
+
+    except Exception as e:
+        print(f"Error loading demo games: {e}")
+        return []
 
 
 def parse_scoreboard_games(scoreboard_data):
@@ -276,7 +299,11 @@ def print_condensed_odds_data(odds_data):
     # print(json.dumps({"games": condensed_games}, indent=2)[:12000])
 
 
-def get_today_nba_games():
+def get_today_nba_games(use_demo=False):
+    if use_demo:
+        print("=== DEMO MODE ENABLED ===")
+        return load_demo_games()
+
     scoreboard_data = safe_get_json(SCOREBOARD_URL)
     odds_data = safe_get_json(ODDS_URL)
 

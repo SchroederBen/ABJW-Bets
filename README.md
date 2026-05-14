@@ -150,6 +150,25 @@ py AI\main.py
 
 to verify whether the underlying pipeline produced output.
 
+## Demo Mode
+
+If there are no live NBA games available, the project can also be run in demo mode using sample games.
+
+Run demo mode from the terminal
+
+py AI\main.py --demo
+
+Run demo mode from the desktop UI
+
+Launch the UI normally with:
+py app.py
+
+Then click:
+Run Demo
+
+Demo mode uses sample game data from:
+AI/demo_games.json
+
 ## Important Notes
 
 * The project depends on live/current-day NBA matchup data.

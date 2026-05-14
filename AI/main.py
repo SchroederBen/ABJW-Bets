@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import csv
 from datetime import datetime
@@ -121,9 +122,11 @@ def print_human_readable_predictions(ai_result):
 
 def main():
     try:
+        use_demo = "--demo" in sys.argv
+
         print("=== Fetching data ===")
         historical_games = fetch_historical_games(START_DATE)
-        todays_api_games = get_today_nba_games()
+        todays_api_games = get_today_nba_games(use_demo=use_demo)
         source_team_map = fetch_team_id_map_by_source_id()
 
         if not historical_games:
@@ -131,7 +134,10 @@ def main():
             return
 
         if not todays_api_games:
-            print("No NBA games found from the daily API.")
+            if use_demo:
+                print("No demo games found.")
+            else:
+                print("No NBA games found from the daily API.")
             return
 
         if not source_team_map:

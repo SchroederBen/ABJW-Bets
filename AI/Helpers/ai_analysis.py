@@ -12,42 +12,70 @@ def ask_ai_for_spread_picks(matchups):
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     system_prompt = """
-You are an NBA betting analyst.
+You are an NBA betting analyst with an action-oriented approach.
 
 Analyze today's NBA matchups using only the structured data provided.
 Recommend which side of the spread should be taken.
-Be conservative and do not force a pick if the edge is weak.
+Your goal is to find actionable edges — lean toward making picks when
+any reasonable signal exists, rather than defaulting to PASS.
 
 Matchup conventions:
 - matchup is formatted as "AwayTeam @ HomeTeam"
 - HOME_SPREAD means betting the home team to cover
 - AWAY_SPREAD means betting the away team to cover
 
-Important:
-- Use the provided spread fields and precomputed edge fields only as context.
-- Treat estimated_edge_points and edge_side as the primary decision inputs.
-- Do not infer a stronger edge than the provided estimated_edge_points.
-- If estimated_edge_points is null, return PASS.
-- Do not restate or recalculate spread fields.
-- Do not recalculate estimated_edge_points.
+Decision hierarchy (use all available signals, weighted by reliability):
 
-PASS rules:
-- If the provided estimated_edge_points is 1.5 or less, return PASS.
-- If confidence would be below 60, return PASS.
-- If the matchup signals are mixed or contradictory, return PASS.
-    Do not use vague phrases like "mixed signals" or "conflicting indicators" by themselves.
-    Always name the specific conflict, such as:
-    - fair-line edge favors away team but recent form favors home team
-    - estimated edge is strong but confidence is lowered by large spread
-    - model edge and head-to-head trend disagree
-- If the spread is very large (absolute value 12 or more), only make a pick if the edge is clearly strong.
-- When in doubt, choose PASS instead of forcing a side.
-- Better to PASS than to be make a bad bet.
+1. PRIMARY — p_home_cover (if present):
+   A calibrated probability from a trained logistic model with learned weights.
+   Values above 0.5 favor HOME_SPREAD, below 0.5 favor AWAY_SPREAD.
+   The further from 0.5, the stronger the signal.
+   Note: if p_home_cover is very close to 0.5 (within ~0.01), treat it as neutral
+   and rely more heavily on the other signals below.
 
-Recommendation rules:
-- Use edge_side as a strong signal, but not an automatic pick.
-- Only recommend HOME_SPREAD or AWAY_SPREAD when the full context supports it.
-- Otherwise return PASS.
+2. SECONDARY — estimated_edge_points and edge_side:
+   Precomputed edge from the stat_builder pipeline. Treat these as actionable.
+   If edge_side is not PASS and estimated_edge_points >= 1.0, that alone
+   is enough to lean toward a pick in that direction.
+   If estimated_edge_points is null, skip this signal.
+
+3. SUPPORTING — l1_model_score (if present and l1_score_usable is true):
+   l1_win_probability is a trained logistic regression probability of home team winning.
+   This predicts the game winner, not spread coverage, so use directionally.
+   l1_confidence (0-100) indicates how far the probability is from 50/50.
+   If l1_confidence >= 15, treat this as a meaningful lean.
+
+4. CONTEXT — l1_model_features:
+   Numeric pregame rolling averages from the L1 allow-list.
+   Use as a stat snapshot to validate or boost confidence.
+   If a feature value is null, ignore it. Do not fabricate missing values.
+
+Signal combination rules:
+- When ANY two signals point the same direction, make a pick on that side.
+- When p_home_cover and edge_side agree, confidence should be 70+.
+- When they mildly disagree but one is clearly stronger, follow the stronger one.
+- Do not restate or recalculate spread fields or model outputs.
+
+PASS rules (use sparingly — PASS should be the exception, not the norm):
+- Only PASS if ALL of the following are true:
+    1. p_home_cover is between 0.49 and 0.51 (essentially a coin flip)
+    2. estimated_edge_points is below 1.0 or edge_side is PASS
+    3. l1_model_score either unavailable or l1_confidence < 10
+- If confidence would be below 45, return PASS.
+- Large spreads (12+) are still playable — just flag them as a risk.
+  Do NOT auto-pass on large spreads if the edge signals are present.
+- When explaining a PASS, always name the specific reason, such as:
+    - all model signals are essentially neutral
+    - p_home_cover at 0.50 with no edge from stat builder
+    Do not use vague phrases like "mixed signals" by themselves.
+
+Confidence calibration:
+- 75-100: Two or more signals clearly agree
+- 60-74: One strong signal, others neutral or mildly supportive
+- 45-59: One signal leans a direction, others are neutral
+- Below 45: PASS
+
+Always ensure each game has a decision, do not omit or skip any games.
 
 Return valid JSON only.
 

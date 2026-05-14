@@ -5,6 +5,7 @@ from pathlib import Path
 import threading
 import queue
 import re
+from datetime import datetime
 
 
 def extract_prediction_blocks(full_output: str):
@@ -101,7 +102,7 @@ def parse_spread_pick_block(block: str):
     return data
 
 
-def format_predictions_for_clipboard(predictions):
+def format_predictions_for_results(predictions):
     lines = []
 
     for index, prediction in enumerate(predictions, start=1):
@@ -127,11 +128,65 @@ def copy_results():
         status_var.set("No results to copy")
         return
 
-    text_to_copy = format_predictions_for_clipboard(last_predictions)
+    text_to_copy = format_predictions_for_results(last_predictions)
     root.clipboard_clear()
     root.clipboard_append(text_to_copy)
     root.update()
     status_var.set("Results copied to clipboard")
+
+
+def save_results():
+    if not last_predictions:
+        status_var.set("No results to save")
+        return
+
+    repo_root = Path(__file__).parent
+    results_dir = repo_root / "results"
+    results_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    mode_text = last_run_mode if last_run_mode else "run"
+    filename = f"results_{mode_text}_{timestamp}.txt"
+    save_path = results_dir / filename
+
+    text_to_save = []
+    text_to_save.append("ABJW Bets Results")
+    text_to_save.append("=" * 60)
+    text_to_save.append(f"Saved: {datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}")
+    text_to_save.append(f"Mode: {mode_text}")
+    text_to_save.append("")
+    text_to_save.append(format_predictions_for_results(last_predictions))
+    text_to_save.append("")
+
+    save_path.write_text("\n".join(text_to_save), encoding="utf-8")
+    status_var.set(f"Results saved to {save_path.name}")
+
+
+def save_raw_output():
+    if not last_raw_output.strip():
+        status_var.set("No raw output to save")
+        return
+
+    repo_root = Path(__file__).parent
+    results_dir = repo_root / "results"
+    results_dir.mkdir(exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+    mode_text = last_run_mode if last_run_mode else "run"
+    filename = f"raw_output_{mode_text}_{timestamp}.txt"
+    save_path = results_dir / filename
+
+    text_to_save = []
+    text_to_save.append("ABJW Bets Raw Output")
+    text_to_save.append("=" * 60)
+    text_to_save.append(f"Saved: {datetime.now().strftime('%Y-%m-%d %I:%M:%S %p')}")
+    text_to_save.append(f"Mode: {mode_text}")
+    text_to_save.append("")
+    text_to_save.append(last_raw_output.rstrip())
+    text_to_save.append("")
+
+    save_path.write_text("\n".join(text_to_save), encoding="utf-8")
+    status_var.set(f"Raw output saved to {save_path.name}")
 
 
 def on_results_mousewheel(event):
@@ -206,9 +261,11 @@ def animate_status():
 
 
 def clear_predictions():
-    global is_running, last_predictions
+    global is_running, last_predictions, last_run_mode, last_raw_output
     is_running = False
     last_predictions = []
+    last_run_mode = ""
+    last_raw_output = ""
 
     status_var.set("Ready to run")
     progress_var.set(0)
@@ -358,14 +415,18 @@ def update_progress_from_line(line: str):
         progress_var.set(100)
 
 
-def start_run(mode_label, worker_target):
-    global is_running, dot_index, last_predictions
+def start_run(mode_label, worker_target, run_mode_name):
+    global is_running, dot_index, last_predictions, last_run_mode, last_raw_output
     last_predictions = []
+    last_run_mode = run_mode_name
+    last_raw_output = ""
 
     run_button.config(state=tk.DISABLED)
     demo_button.config(state=tk.DISABLED)
     clear_button.config(state=tk.DISABLED)
     copy_button.config(state=tk.DISABLED)
+    save_button.config(state=tk.DISABLED)
+    save_raw_button.config(state=tk.DISABLED)
 
     clear_cards_container()
 
@@ -388,11 +449,11 @@ def start_run(mode_label, worker_target):
 
 
 def run_predictions():
-    start_run("Starting pipeline", run_predictions_worker)
+    start_run("Starting pipeline", run_predictions_worker, "live")
 
 
 def run_demo_predictions():
-    start_run("Starting demo pipeline", run_demo_worker)
+    start_run("Starting demo pipeline", run_demo_worker, "demo")
 
 
 def run_predictions_worker():
@@ -462,17 +523,20 @@ def poll_output_queue():
 
 
 def finish_run(return_code, full_output):
-    global is_running, last_predictions
+    global is_running, last_predictions, last_raw_output
     is_running = False
+    last_raw_output = full_output
 
     run_button.config(state=tk.NORMAL)
     demo_button.config(state=tk.NORMAL)
     clear_button.config(state=tk.NORMAL)
+    save_raw_button.config(state=tk.NORMAL)
 
     toggle_raw_button.pack(pady=(0, 8))
 
     if return_code != 0:
         copy_button.config(state=tk.DISABLED)
+        save_button.config(state=tk.DISABLED)
         status_var.set("Run failed")
         progress_var.set(0)
 
@@ -505,6 +569,7 @@ def finish_run(return_code, full_output):
 
     if not blocks:
         copy_button.config(state=tk.DISABLED)
+        save_button.config(state=tk.DISABLED)
         status_var.set("Run completed, but no predictions were found")
         clear_cards_container()
         show_placeholder("No readable predictions found.")
@@ -533,6 +598,7 @@ def finish_run(return_code, full_output):
         make_card(cards_container, prediction)
 
     copy_button.config(state=tk.NORMAL)
+    save_button.config(state=tk.NORMAL)
     status_var.set(f"Run completed: {len(parsed_predictions)} prediction(s)")
     progress_var.set(100)
     refresh_scroll_region()
@@ -550,6 +616,8 @@ current_status_base = "Ready to run"
 dot_index = 0
 dot_states = [".", "..", "..."]
 last_predictions = []
+last_run_mode = ""
+last_raw_output = ""
 
 title_label = tk.Label(
     root,
@@ -611,6 +679,28 @@ copy_button = tk.Button(
     state=tk.DISABLED
 )
 copy_button.pack(side=tk.LEFT, padx=6)
+
+save_button = tk.Button(
+    button_row,
+    text="Save Results",
+    font=("Arial", 11),
+    padx=12,
+    pady=6,
+    command=save_results,
+    state=tk.DISABLED
+)
+save_button.pack(side=tk.LEFT, padx=6)
+
+save_raw_button = tk.Button(
+    button_row,
+    text="Save Raw Output",
+    font=("Arial", 11),
+    padx=12,
+    pady=6,
+    command=save_raw_output,
+    state=tk.DISABLED
+)
+save_raw_button.pack(side=tk.LEFT, padx=6)
 
 status_var = tk.StringVar(value="Ready to run")
 status_label = tk.Label(

@@ -112,6 +112,41 @@ def nz(value, default=0.0):
     return default if value is None else value
 
 
+def safe_diff(a, b):
+    if a is None or b is None:
+        return None
+    return round(a - b, 3)
+
+
+def first_not_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
+def total_rebounds_from_features(prefix, features):
+    total_5 = features.get(f"{prefix}total_rebounds_MA_5")
+    if total_5 is not None:
+        return total_5
+
+    off_5 = features.get(f"{prefix}offensive_rebounds_MA_5")
+    def_5 = features.get(f"{prefix}defensive_rebounds_MA_5")
+    if off_5 is not None and def_5 is not None:
+        return round(off_5 + def_5, 3)
+
+    total_3 = features.get(f"{prefix}total_rebounds_MA_3")
+    if total_3 is not None:
+        return total_3
+
+    off_3 = features.get(f"{prefix}offensive_rebounds_MA_3")
+    def_3 = features.get(f"{prefix}defensive_rebounds_MA_3")
+    if off_3 is not None and def_3 is not None:
+        return round(off_3 + def_3, 3)
+
+    return None
+
+
 def calc_site_point_diff(team_summary, is_home):
     if is_home:
         pf = nz(team_summary.get("home_avg_pts_for"))
@@ -399,6 +434,21 @@ def calculate_estimated_edge_learned(home_summary, away_summary, market_home_spr
 
 def summarize_team(team_id, stats):
     recent_n = 5
+    recent_n_3 = 3
+    recent_n_10 = 10
+
+    recent_results_5 = stats["recent_results"][-recent_n:]
+    recent_results_10 = stats["recent_results"][-recent_n_10:]
+
+    recent_point_diff_3 = stats["recent_point_diff"][-recent_n_3:]
+    recent_point_diff_5 = stats["recent_point_diff"][-recent_n:]
+    recent_point_diff_10 = stats["recent_point_diff"][-recent_n_10:]
+
+    recent_pts_for_5 = stats["recent_pts_for"][-recent_n:]
+    recent_pts_against_5 = stats["recent_pts_against"][-recent_n:]
+
+    recent_ats_5 = stats["recent_ats"][-recent_n:]
+    recent_ats_10 = stats["recent_ats"][-recent_n_10:]
 
     return {
         "team_id": team_id,
@@ -423,11 +473,22 @@ def summarize_team(team_id, stats):
         "ats_games": stats["ats_games"],
         "ats_win_pct": pct(stats["ats_wins"], stats["ats_games"]),
 
-        "last_5_win_pct": pct(sum(stats["recent_results"][-recent_n:]), len(stats["recent_results"][-recent_n:])),
-        "last_5_avg_point_diff": avg(stats["recent_point_diff"][-recent_n:]),
-        "last_5_avg_pts_for": avg(stats["recent_pts_for"][-recent_n:]),
-        "last_5_avg_pts_against": avg(stats["recent_pts_against"][-recent_n:]),
-        "last_5_ats_win_pct": pct(sum(stats["recent_ats"][-recent_n:]), len(stats["recent_ats"][-recent_n:])),
+        "last_5_win_pct": pct(sum(recent_results_5), len(recent_results_5)),
+        "last_5_avg_point_diff": avg(recent_point_diff_5),
+        "last_5_avg_pts_for": avg(recent_pts_for_5),
+        "last_5_avg_pts_against": avg(recent_pts_against_5),
+        "last_5_ats_win_pct": pct(sum(recent_ats_5), len(recent_ats_5)),
+
+        "point_diff_MA_3": avg(recent_point_diff_3),
+        "point_diff_MA_5": avg(recent_point_diff_5),
+        "point_diff_MA_10": avg(recent_point_diff_10),
+
+        "ATS_cover_rate_MA_5": pct(sum(recent_ats_5), len(recent_ats_5)),
+        "ATS_cover_rate_MA_10": pct(sum(recent_ats_10), len(recent_ats_10)),
+
+        "last_10_win_pct": pct(sum(recent_results_10), len(recent_results_10)),
+        "last_10_avg_point_diff": avg(recent_point_diff_10),
+        "last_10_ats_win_pct": pct(sum(recent_ats_10), len(recent_ats_10)),
     }
 
 
@@ -713,6 +774,10 @@ def build_matchup_payload_from_api_games(
             "away_stats": away_summary,
             "head_to_head_stats": h2h_stats,
 
+            "rest_advantage": None,
+            "turnover_edge_MA_5": None,
+            "rebound_edge_MA_5": None,
+
             # Primary edge fields sent to AI
             "projected_home_margin": active_edge_info["projected_home_margin"],
             "fair_home_spread": active_edge_info["fair_home_spread"],
@@ -752,6 +817,32 @@ def build_matchup_payload_from_api_games(
                 "null_feature_count": null_feature_count,
                 "data_source": "box_scores" if has_box_scores else "scores_only",
             }
+
+            days_rest = l1_features.get("days_rest")
+            opp_days_rest = l1_features.get("opp_days_rest")
+            game_entry["rest_advantage"] = safe_diff(days_rest, opp_days_rest)
+
+            team_turnovers = first_not_none(
+                l1_features.get("turnovers_MA_5"),
+                l1_features.get("turnovers_MA_10"),
+                l1_features.get("turnovers_MA_3"),
+            )
+
+            opp_turnovers = first_not_none(
+                l1_features.get("opp_turnovers_MA_5"),
+                l1_features.get("opp_turnovers_MA_10"),
+                l1_features.get("opp_turnovers_MA_3"),
+            )
+
+            game_entry["turnover_edge_MA_5"] = safe_diff(opp_turnovers, team_turnovers)
+
+            team_total_rebounds = total_rebounds_from_features("", l1_features)
+            opp_total_rebounds = total_rebounds_from_features("opp_", l1_features)
+
+            game_entry["rebound_edge_MA_5"] = safe_diff(
+                team_total_rebounds,
+                opp_total_rebounds
+            )
         else:
             game_entry["l1_model_features_meta"] = {
                 "enabled": False,

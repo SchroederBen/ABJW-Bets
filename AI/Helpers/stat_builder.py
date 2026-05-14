@@ -147,6 +147,140 @@ def total_rebounds_from_features(prefix, features):
     return None
 
 
+def clamp_probability(value, low=0.01, high=0.99):
+    if value is None:
+        return None
+    return max(low, min(high, value))
+
+
+def probability_to_american_odds(probability):
+    if probability is None or probability <= 0 or probability >= 1:
+        return None
+
+    if probability >= 0.5:
+        return int(round(-100 * probability / (1 - probability)))
+
+    return int(round(100 * (1 - probability) / probability))
+
+
+def american_odds_profit_per_unit(odds):
+    if odds is None:
+        return None
+
+    if odds > 0:
+        return odds / 100.0
+
+    if odds < 0:
+        return 100.0 / abs(odds)
+
+    return None
+
+
+def expected_value_per_unit(win_probability, american_odds):
+    if win_probability is None or american_odds is None:
+        return None
+
+    profit_if_win = american_odds_profit_per_unit(american_odds)
+    if profit_if_win is None:
+        return None
+
+    lose_probability = 1.0 - win_probability
+    ev = (win_probability * profit_if_win) - lose_probability
+    return round(ev, 4)
+
+
+def estimate_cover_probability(projected_home_margin, market_home_spread, logit_scale=0.11, logit_bias=0.0):
+    if projected_home_margin is None or market_home_spread is None:
+        return None
+
+    # same basic form already used by the learned head:
+    # sigmoid(bias + scale * (projected_home_margin + market_home_spread))
+    logit = logit_bias + logit_scale * (projected_home_margin + market_home_spread)
+    logit = max(-60.0, min(60.0, logit))
+    probability = 1.0 / (1.0 + math.exp(-logit))
+    return clamp_probability(probability)
+
+
+def build_spread_ev_context(primary_edge_info, learned_edge_info, market_home_spread, assumed_spread_price=-110):
+    if market_home_spread is None:
+        return {
+            "home_cover_probability": None,
+            "away_cover_probability": None,
+            "home_fair_cover_odds": None,
+            "away_fair_cover_odds": None,
+            "assumed_spread_price_home": assumed_spread_price,
+            "assumed_spread_price_away": assumed_spread_price,
+            "home_spread_ev_per_unit": None,
+            "away_spread_ev_per_unit": None,
+            "best_spread_ev_side": "PASS",
+            "best_spread_ev_per_unit": None,
+            "ev_model_source": "unavailable",
+        }
+
+    home_cover_probability = learned_edge_info.get("p_home_cover")
+    ev_model_source = "learned_model"
+
+    if home_cover_probability is None:
+        home_cover_probability = estimate_cover_probability(
+            primary_edge_info.get("projected_home_margin"),
+            market_home_spread
+        )
+        ev_model_source = "projected_margin_fallback"
+
+    if home_cover_probability is None:
+        return {
+            "home_cover_probability": None,
+            "away_cover_probability": None,
+            "home_fair_cover_odds": None,
+            "away_fair_cover_odds": None,
+            "assumed_spread_price_home": assumed_spread_price,
+            "assumed_spread_price_away": assumed_spread_price,
+            "home_spread_ev_per_unit": None,
+            "away_spread_ev_per_unit": None,
+            "best_spread_ev_side": "PASS",
+            "best_spread_ev_per_unit": None,
+            "ev_model_source": "unavailable",
+        }
+
+    home_cover_probability = clamp_probability(home_cover_probability)
+    away_cover_probability = clamp_probability(1.0 - home_cover_probability)
+
+    home_fair_cover_odds = probability_to_american_odds(home_cover_probability)
+    away_fair_cover_odds = probability_to_american_odds(away_cover_probability)
+
+    home_spread_ev_per_unit = expected_value_per_unit(home_cover_probability, assumed_spread_price)
+    away_spread_ev_per_unit = expected_value_per_unit(away_cover_probability, assumed_spread_price)
+
+    best_spread_ev_side = "PASS"
+    best_spread_ev_per_unit = None
+
+    if home_spread_ev_per_unit is not None and away_spread_ev_per_unit is not None:
+        if home_spread_ev_per_unit > 0 or away_spread_ev_per_unit > 0:
+            if home_spread_ev_per_unit >= away_spread_ev_per_unit:
+                best_spread_ev_side = "HOME_SPREAD"
+                best_spread_ev_per_unit = home_spread_ev_per_unit
+            else:
+                best_spread_ev_side = "AWAY_SPREAD"
+                best_spread_ev_per_unit = away_spread_ev_per_unit
+        else:
+            best_spread_ev_side = "PASS"
+            best_spread_ev_per_unit = max(home_spread_ev_per_unit, away_spread_ev_per_unit)
+
+    return {
+        "home_cover_probability": round(home_cover_probability, 4) if home_cover_probability is not None else None,
+        "away_cover_probability": round(away_cover_probability, 4) if away_cover_probability is not None else None,
+        "home_fair_cover_odds": home_fair_cover_odds,
+        "away_fair_cover_odds": away_fair_cover_odds,
+        "assumed_spread_price_home": assumed_spread_price,
+        "assumed_spread_price_away": assumed_spread_price,
+        "home_spread_ev_per_unit": home_spread_ev_per_unit,
+        "away_spread_ev_per_unit": away_spread_ev_per_unit,
+        "best_spread_ev_side": best_spread_ev_side,
+        "best_spread_ev_per_unit": best_spread_ev_per_unit,
+        "ev_model_source": ev_model_source,
+    }
+
+
 def calc_site_point_diff(team_summary, is_home):
     if is_home:
         pf = nz(team_summary.get("home_avg_pts_for"))
@@ -762,6 +896,13 @@ def build_matchup_payload_from_api_games(
         spread_move_away = safe_diff(away_current_spread, away_opening_spread)
         total_move = safe_diff(current_total, opening_total)
 
+        ev_context = build_spread_ev_context(
+            active_edge_info,
+            edge_info_learned,
+            home_current_spread,
+            assumed_spread_price=-110
+        )
+
         game_entry = {
             "game_id": int(g["nba_game_id"]) if g["nba_game_id"] else None,
             "matchup": f"{away_team['team_name']} @ {home_team['team_name']}",
@@ -784,6 +925,18 @@ def build_matchup_payload_from_api_games(
             "spread_move_home": spread_move_home,
             "spread_move_away": spread_move_away,
             "total_move": total_move,
+
+            "home_cover_probability": ev_context["home_cover_probability"],
+            "away_cover_probability": ev_context["away_cover_probability"],
+            "home_fair_cover_odds": ev_context["home_fair_cover_odds"],
+            "away_fair_cover_odds": ev_context["away_fair_cover_odds"],
+            "assumed_spread_price_home": ev_context["assumed_spread_price_home"],
+            "assumed_spread_price_away": ev_context["assumed_spread_price_away"],
+            "home_spread_ev_per_unit": ev_context["home_spread_ev_per_unit"],
+            "away_spread_ev_per_unit": ev_context["away_spread_ev_per_unit"],
+            "best_spread_ev_side": ev_context["best_spread_ev_side"],
+            "best_spread_ev_per_unit": ev_context["best_spread_ev_per_unit"],
+            "ev_model_source": ev_context["ev_model_source"],
 
             "home_team_id": home_team_id,
             "away_team_id": away_team_id,

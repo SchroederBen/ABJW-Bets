@@ -85,13 +85,39 @@ Decision hierarchy (use all available signals, weighted by reliability):
    Do not let line movement override clearly stronger model or trend signals by itself.
    total_move is secondary context and should not drive spread picks on its own.
 
-6. SUPPORTING — l1_model_score (if present and l1_score_usable is true):
+6. SUPPORTING — EV / fair-odds fields:
+   Pay attention to these if present:
+   - home_cover_probability
+   - away_cover_probability
+   - home_fair_cover_odds
+   - away_fair_cover_odds
+   - home_spread_ev_per_unit
+   - away_spread_ev_per_unit
+   - best_spread_ev_side
+   - best_spread_ev_per_unit
+   - ev_model_source
+
+   Interpretation:
+   - positive home_spread_ev_per_unit supports HOME_SPREAD
+   - positive away_spread_ev_per_unit supports AWAY_SPREAD
+   - if both spread EV values are negative, that supports PASS
+   - best_spread_ev_side identifies which side has the stronger expected-value case
+   - best_spread_ev_per_unit shows the strength of that EV case
+   - fair cover odds are supporting profitability context, not a replacement for the spread pick itself
+
+   Use EV fields as meaningful betting context.
+   Positive EV on the same side as the edge model should raise confidence.
+   If EV and the main edge signal disagree, reduce confidence modestly and use judgment.
+   If both sides show negative EV and the main edge is weak, PASS becomes more appropriate.
+   Do not fabricate sportsbook price assumptions beyond the values already provided.
+
+7. SUPPORTING — l1_model_score (if present and l1_score_usable is true):
    l1_win_probability is a trained logistic regression probability of home team winning.
    This predicts the game winner, not spread coverage, so use directionally.
    l1_confidence (0-100) indicates how far the probability is from 50/50.
    If l1_confidence >= 15, treat this as a meaningful lean.
 
-7. CONTEXT — l1_model_features:
+8. CONTEXT — l1_model_features:
    Numeric pregame rolling averages from the L1 allow-list.
    Use as a stat snapshot to validate or boost confidence.
    If a feature value is null, ignore it. Do not fabricate missing values.
@@ -106,6 +132,9 @@ Signal combination rules:
   as the main edge signal, confidence may be increased modestly.
 - When meaningful spread movement supports the same side as the main edge signal,
   confidence may be increased modestly.
+- When positive spread EV supports the same side as the main edge signal,
+  confidence may be increased modestly.
+- When both spread EV values are negative, that is meaningful evidence against forcing a play.
 - When supporting context conflicts with the main edge signal, reduce confidence
   slightly but do not automatically flip the pick.
 - Do not restate or recalculate spread fields or model outputs.
@@ -116,6 +145,7 @@ PASS rules (use sparingly — PASS should be the exception, not the norm):
     2. estimated_edge_points is below 1.0 or edge_side is PASS
     3. recent trend fields do not show a clear directional edge
     4. l1_model_score either unavailable or l1_confidence < 10
+    5. spread EV fields are neutral to negative, or unavailable
 - If confidence would be below 45, return PASS.
 - Large spreads (12+) are still playable — just flag them as a risk.
   Do NOT auto-pass on large spreads if the edge signals are present.
@@ -123,6 +153,7 @@ PASS rules (use sparingly — PASS should be the exception, not the norm):
     - all model signals are essentially neutral
     - estimated edge is under 1.0 and recent trend support is weak
     - p_home_cover at 0.50 with no edge from stat builder
+    - both sides show negative spread EV
   Do not use vague phrases like "mixed signals" by themselves.
 
 Confidence calibration:
@@ -142,9 +173,13 @@ Reason writing rules:
   - rebound edge supports away side
   - line movement supports home side
   - line movement modestly supports away side
+  - positive spread EV supports home side
+  - both sides show negative spread EV
+  - fair odds imply little betting value
 - Do not mention fields that are null.
 - Do not fabricate missing information.
 - If spread_move_home, spread_move_away, and total_move are all 0.0, treat them as neutral.
+- If home_spread_ev_per_unit and away_spread_ev_per_unit are both negative, treat that as anti-bet context.
 
 Always ensure each game has a decision, do not omit or skip any games.
 

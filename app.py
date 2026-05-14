@@ -40,6 +40,8 @@ def parse_human_prediction_line(line: str):
         "bet": "",
         "confidence": "",
         "edge": "",
+        "projected_margin": "",
+        "fair_home_spread": "",
         "reason": "",
         "risk_flags": "",
     }
@@ -54,6 +56,10 @@ def parse_human_prediction_line(line: str):
             data["confidence"] = part.replace("Confidence:", "", 1).strip()
         elif part.startswith("Estimated Edge:"):
             data["edge"] = part.replace("Estimated Edge:", "", 1).strip()
+        elif part.startswith("Projected Margin:"):
+            data["projected_margin"] = part.replace("Projected Margin:", "", 1).strip()
+        elif part.startswith("Fair Home Spread:"):
+            data["fair_home_spread"] = part.replace("Fair Home Spread:", "", 1).strip()
         elif part.startswith("Reason:"):
             data["reason"] = part.replace("Reason:", "", 1).strip()
         elif part.startswith("Risk Flags:"):
@@ -68,6 +74,8 @@ def parse_spread_pick_block(block: str):
         "bet": "",
         "confidence": "",
         "edge": "",
+        "projected_margin": "",
+        "fair_home_spread": "",
         "reason": "",
         "risk_flags": "",
     }
@@ -85,6 +93,8 @@ def parse_spread_pick_block(block: str):
     data["bet"] = extract_value("Pick:")
     data["confidence"] = extract_value("Confidence:")
     data["edge"] = extract_value("Estimated Edge:")
+    data["projected_margin"] = extract_value("Projected Margin:")
+    data["fair_home_spread"] = extract_value("Fair Home Spread:")
     data["reason"] = extract_value("Reason:")
     data["risk_flags"] = extract_value("Risk Flags:")
 
@@ -96,10 +106,15 @@ def format_predictions_for_clipboard(predictions):
 
     for index, prediction in enumerate(predictions, start=1):
         risk_text = prediction["risk_flags"] if prediction["risk_flags"] else "None"
+        projected_margin = prediction["projected_margin"] if prediction["projected_margin"] else "N/A"
+        fair_home_spread = prediction["fair_home_spread"] if prediction["fair_home_spread"] else "N/A"
+
         lines.append(f"{index}. {prediction['matchup']}")
         lines.append(f"Bet: {prediction['bet']}")
         lines.append(f"Confidence: {prediction['confidence']}")
         lines.append(f"Estimated Edge: {prediction['edge']}")
+        lines.append(f"Projected Margin: {projected_margin}")
+        lines.append(f"Fair Home Spread: {fair_home_spread}")
         lines.append(f"Reason: {prediction['reason']}")
         lines.append(f"Risk Flags: {risk_text}")
         lines.append("")
@@ -266,6 +281,20 @@ def make_card(parent, prediction):
         justify="left",
     )
     details_label.pack(fill=tk.X, pady=(4, 0))
+
+    margin_text = (
+        f'Projected Margin: {prediction["projected_margin"]}    '
+        f'Fair Home Spread: {prediction["fair_home_spread"]}'
+    )
+    margin_label = tk.Label(
+        card,
+        text=margin_text,
+        font=("Arial", 10),
+        bg="white",
+        anchor="w",
+        justify="left",
+    )
+    margin_label.pack(fill=tk.X, pady=(4, 0))
 
     reason_label = tk.Label(
         card,
